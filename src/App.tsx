@@ -26,6 +26,7 @@ import { RankingsView } from './pages/RankingsView.tsx';
 import { AnimeDetailsView } from './pages/AnimeDetailsView.tsx';
 import { UserProfileView } from './pages/UserProfileView.tsx';
 import { WatchView } from './pages/WatchView.tsx';
+import { AdminView } from './pages/AdminView.tsx';
 
 import { getMedia } from './services/api.ts';
 import { Search, Flame, Clock, Newspaper, User, AlertTriangle, RefreshCw } from 'lucide-react';
@@ -134,7 +135,7 @@ export default function App() {
 
     // General tab paths
     const tabName = path.replace('/', '').toLowerCase();
-    if (['home', 'anime', 'airing', 'schedule', 'countdown', 'news', 'genres', 'rankings', 'watchlist', 'profile'].includes(tabName)) {
+    if (['home', 'anime', 'airing', 'schedule', 'countdown', 'news', 'genres', 'rankings', 'watchlist', 'profile', 'admin'].includes(tabName)) {
       setCurrentTab(tabName);
       setSelectedAnimeId(null);
       setWatchAnimeId(null);
@@ -360,6 +361,8 @@ export default function App() {
                   onWatchAnime={handleWatchAnime}
                 />
               )}
+
+              {currentTab === 'admin' && <AdminView />}
             </>
           )}
         </main>

@@ -169,6 +169,17 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onNavigate, onOpenSe
                     <span>Watchlist ({watchlistCount})</span>
                   </button>
 
+                  <button
+                    onClick={() => {
+                      setIsUserDropdownOpen(false);
+                      onNavigate('admin');
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium text-rose-400 hover:bg-rose-500/10 transition-colors"
+                  >
+                    <Shield className="w-4 h-4 text-rose-400" />
+                    <span>Admin Dashboard</span>
+                  </button>
+
                   <div className="my-1 border-t border-white/5" />
 
                   <button
