@@ -1,0 +1,6 @@
+{
+  "name": "KURO NAMI - Anime Discovery & Airing Platform",
+  "description": "Discover trending, currently airing, and upcoming anime with live countdowns, weekly airing schedules, and real-time metadata powered by AniList and Jikan.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
