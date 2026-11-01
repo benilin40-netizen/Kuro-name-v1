@@ -5,6 +5,8 @@
  * Sources: Anime News Network, Crunchyroll News
  */
 
+import { NewsVideo } from '../types/news';
+
 export interface NewsArticle {
   id: string;
   title: string;
@@ -17,6 +19,7 @@ export interface NewsArticle {
   author?: string | null;
   anime_id?: number | null;
   anime_title?: string | null;
+  video?: NewsVideo | null;
 }
 
 export interface NewsSourceStatus {

@@ -2,6 +2,15 @@ import { XMLParser } from 'fast-xml-parser';
 import crypto from 'node:crypto';
 import { db } from './db.ts';
 
+export interface NewsVideo {
+  type: 'embed' | 'mp4' | 'hls';
+  url: string;
+  thumbnail?: string;
+  provider?: string;
+  title?: string;
+  duration?: number;
+}
+
 export interface NewsArticle {
   id: string;
   title: string;
@@ -14,6 +23,7 @@ export interface NewsArticle {
   author: string | null;
   anime_id?: number | null;
   anime_title?: string | null;
+  video?: NewsVideo | null;
 }
 
 export interface NewsSourceStatus {
@@ -66,6 +76,44 @@ export class NewsService {
       .replace(/&#8221;/g, '"')
       .replace(/\s+/g, ' ')
       .trim();
+  }
+
+  private static detectVideo(item: any): NewsVideo | null {
+    if (item.enclosure && item.enclosure.url && item.enclosure.type && item.enclosure.type.startsWith('video/')) {
+        return {
+            type: item.enclosure.type.includes('mp4') ? 'mp4' : 'hls',
+            url: item.enclosure.url,
+            provider: 'rss-enclosure'
+        };
+    }
+    const mediaContent = item['media:content'];
+    if (mediaContent && mediaContent.url && mediaContent.type && mediaContent.type.startsWith('video/')) {
+         return {
+            type: mediaContent.type.includes('mp4') ? 'mp4' : 'hls',
+            url: mediaContent.url,
+            provider: 'media-content'
+        };
+    }
+    return null;
+  }
+
+  private static detectVideo(item: any): NewsVideo | null {
+    if (item.enclosure && item.enclosure.url && item.enclosure.type && item.enclosure.type.startsWith('video/')) {
+        return {
+            type: item.enclosure.type.includes('mp4') ? 'mp4' : 'hls',
+            url: item.enclosure.url,
+            provider: 'rss-enclosure'
+        };
+    }
+    const mediaContent = item['media:content'];
+    if (mediaContent && mediaContent.url && mediaContent.type && mediaContent.type.startsWith('video/')) {
+         return {
+            type: mediaContent.type.includes('mp4') ? 'mp4' : 'hls',
+            url: mediaContent.url,
+            provider: 'media-content'
+        };
+    }
+    return null;
   }
 
   /**
@@ -241,6 +289,7 @@ export class NewsService {
 
           const hash = crypto.createHash('sha256').update(link || title).digest('hex').slice(0, 16);
           const id = `ann_${hash}`;
+          const video = NewsService.detectVideo(item);
 
           articles.push({
             id,
@@ -254,6 +303,7 @@ export class NewsService {
             author,
             anime_id: match.animeId,
             anime_title: match.animeTitle,
+            video,
           });
         }
 
@@ -350,6 +400,7 @@ export class NewsService {
 
           const hash = crypto.createHash('sha256').update(link || title).digest('hex').slice(0, 16);
           const id = `cr_${hash}`;
+          const video = NewsService.detectVideo(item);
 
           articles.push({
             id,
@@ -363,6 +414,7 @@ export class NewsService {
             author,
             anime_id: match.animeId,
             anime_title: match.animeTitle,
+            video,
           });
         }
 

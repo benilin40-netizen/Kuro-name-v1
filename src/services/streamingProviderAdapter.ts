@@ -11,6 +11,8 @@
  * - Development-only diagnostic logging
  */
 
+import { getAniEmbedUrl } from './aniembedService.ts';
+
 export interface StreamingSourceItem {
   id?: string;
   url: string;
@@ -334,6 +336,16 @@ function matchesAnimeTitle(targetTitles: string[], targetYear?: number | null, c
   return false;
 }
 
+export interface AnimeMetadataHint {
+  title?: string;
+  titles?: string[];
+  year?: number | null;
+  malId?: number | null;
+  anilistId?: number | null;
+  tmdbId?: number | string | null;
+  providerAnimeId?: string | null;
+}
+
 export class AnimePaheAdapterProvider implements StreamingProvider {
   readonly id = 'animepahe_adapter';
   readonly name = 'AnimePahe (CoorenLabs)';
@@ -341,46 +353,108 @@ export class AnimePaheAdapterProvider implements StreamingProvider {
   /**
    * 1. Search Anime & cache provider-specific animeId (animeSession) in sessionStorage
    */
-  async resolveAnimeSession(animeId: string, signal?: AbortSignal): Promise<string | null> {
+  async resolveAnimeSession(
+    animeId: string,
+    signal?: AbortSignal,
+    metadataHint?: AnimeMetadataHint
+  ): Promise<string | null> {
+    // Check if animeId itself is already a provider session hash (alphanumeric string > 10 chars, not purely a numeric AniList ID)
+    if (animeId && !/^\d+$/.test(animeId.trim()) && animeId.trim().length >= 8) {
+      console.log(`[COOREN-API] Input ID is already a provider anime session: ${animeId}`);
+      return animeId.trim();
+    }
+
     const cacheKey = `pahe_session_${animeId}`;
     if (typeof sessionStorage !== 'undefined') {
-      const cached = sessionStorage.getItem(cacheKey);
+      const cached = sessionStorage.getItem(cacheKey) || sessionStorage.getItem(`provider_pahe_id_${animeId}`);
       if (cached) {
         console.log(`[COOREN-API CACHE] SessionStorage hit for anime ID #${animeId}: ${cached}`);
         return cached;
       }
     }
 
-    const base = getBaseUrl();
-    const animeDetailsUrl = `${base}/api/anime/${encodeURIComponent(animeId)}`;
-    console.log(`[COOREN-API DIAGNOSTIC] Fetching anime details from: ${animeDetailsUrl}`);
-    const res = await fetch(animeDetailsUrl, { signal });
-    if (!res.ok) {
-      console.warn(`[COOREN-API DIAGNOSTIC] Failed to fetch anime details: HTTP ${res.status} ${res.statusText}`);
-      return null;
-    }
-    const animeData = await res.json();
-    console.log(`[COOREN-API DIAGNOSTIC] Anime details response received:`, animeData?.title);
+    let targetTitles: string[] = [];
+    let targetYear: number | null = metadataHint?.year || null;
 
-    const titleEng = animeData?.title?.english;
-    const titleRom = animeData?.title?.romaji;
-    const titlePref = animeData?.title?.userPreferred;
-    const mainTitle = titleEng || titleRom || titlePref;
+    // Use metadata hint if provided
+    if (metadataHint) {
+      if (metadataHint.providerAnimeId) {
+        return metadataHint.providerAnimeId;
+      }
+      if (metadataHint.titles && metadataHint.titles.length > 0) {
+        targetTitles = metadataHint.titles.filter(Boolean);
+      } else if (metadataHint.title) {
+        targetTitles = [metadataHint.title];
+      }
+    }
+
+    // If titles not yet resolved, query backend with clean multi-tier fallback
+    if (targetTitles.length === 0) {
+      const base = getBaseUrl();
+      const animeDetailsUrl = `${base}/api/anime/${encodeURIComponent(animeId)}`;
+      console.log(`[COOREN-API DIAGNOSTIC] Resolving anime metadata for #${animeId}...`);
+
+      try {
+        const res = await fetch(animeDetailsUrl, { signal });
+        if (res.ok) {
+          const animeData = await res.json();
+          const tEng = animeData?.title?.english;
+          const tRom = animeData?.title?.romaji;
+          const tPref = animeData?.title?.userPreferred;
+          targetTitles = [tEng, tRom, tPref].filter(Boolean) as string[];
+          targetYear = targetYear || animeData?.seasonYear || animeData?.year || animeData?.startDate?.year || null;
+        } else {
+          console.log(`[COOREN-API DIAGNOSTIC] Backend /api/anime/${animeId} returned ${res.status}, checking Miruro info fallback...`);
+          // Fallback to Miruro anime info
+          const mRes = await fetch(`${base}/api/miruro/info/${encodeURIComponent(animeId)}`, { signal }).catch(() => null);
+          if (mRes && mRes.ok) {
+            const mData = await mRes.json();
+            const tEng = mData?.title?.english;
+            const tRom = mData?.title?.romaji;
+            const tPref = mData?.title?.userPreferred || mData?.title?.native;
+            targetTitles = [tEng, tRom, tPref].filter(Boolean) as string[];
+            targetYear = targetYear || mData?.seasonYear || mData?.year || null;
+          }
+        }
+      } catch (err: any) {
+        if (err.name === 'AbortError') return null;
+        console.warn(`[COOREN-API DIAGNOSTIC] Metadata fetch notice:`, err.message);
+      }
+    }
+
+    // Check sessionStorage for cached current anime title if still empty
+    if (targetTitles.length === 0 && typeof sessionStorage !== 'undefined') {
+      const storedTitle = sessionStorage.getItem(`anime_title_${animeId}`);
+      if (storedTitle) targetTitles = [storedTitle];
+    }
+
+    const mainTitle = targetTitles[0];
     if (!mainTitle) {
-      console.warn(`[COOREN-API DIAGNOSTIC] No valid title found in anime metadata for ID ${animeId}`);
+      console.warn(`[COOREN-API DIAGNOSTIC] No metadata title resolved for ID #${animeId}`);
       return null;
     }
 
-    const targetTitles = [titleEng, titleRom, titlePref].filter(Boolean) as string[];
-    const targetYear = animeData?.seasonYear || animeData?.year || (animeData?.startDate?.year);
+    console.log(`[COOREN-API DIAGNOSTIC] Searching AnimePahe provider for "${mainTitle}" (Year: ${targetYear || 'Unknown'})`);
+    let searchResults: any[] = [];
+    try {
+      searchResults = await AnimePaheAPI.search(mainTitle);
+    } catch (sErr: any) {
+      console.warn(`[COOREN-API DIAGNOSTIC] AnimePahe search call returned:`, sErr.message);
+    }
 
-    console.log(`[COOREN-API DIAGNOSTIC] Searching AnimePahe for title: "${mainTitle}" (Year: ${targetYear})`);
-    const searchResults = await AnimePaheAPI.search(mainTitle);
     if (signal?.aborted) return null;
-    console.log(`[COOREN-API DIAGNOSTIC] AnimePahe search results count:`, searchResults?.length || 0);
 
     if (!searchResults || searchResults.length === 0) {
-      console.warn(`[COOREN-API DIAGNOSTIC] No search results found on AnimePahe for "${mainTitle}"`);
+      // Try secondary title variant if available
+      if (targetTitles.length > 1) {
+        try {
+          searchResults = await AnimePaheAPI.search(targetTitles[1]);
+        } catch {}
+      }
+    }
+
+    if (!searchResults || searchResults.length === 0) {
+      console.warn(`[COOREN-API DIAGNOSTIC] No matching releases on AnimePahe for "${mainTitle}"`);
       return null;
     }
 
@@ -389,14 +463,11 @@ export class AnimePaheAdapterProvider implements StreamingProvider {
     );
 
     if (!matchedResult && searchResults.length > 0) {
-      const candidate = searchResults[0];
-      if (matchesAnimeTitle(targetTitles, targetYear, candidate.title, candidate.year)) {
-        matchedResult = candidate;
-      }
+      matchedResult = searchResults[0];
     }
 
     if (!matchedResult || !matchedResult.animeSession) {
-      console.warn(`[COOREN-API DIAGNOSTIC] Could not match anime search result to target titles for "${mainTitle}"`);
+      console.warn(`[COOREN-API DIAGNOSTIC] Could not extract animeSession for "${mainTitle}"`);
       return null;
     }
 
@@ -405,6 +476,7 @@ export class AnimePaheAdapterProvider implements StreamingProvider {
 
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.setItem(cacheKey, animeSession);
+      sessionStorage.setItem(`provider_pahe_id_${animeId}`, animeSession);
     }
 
     return animeSession;
@@ -434,10 +506,11 @@ export class AnimePaheAdapterProvider implements StreamingProvider {
   async getEpisodeSources(
     animeId: string,
     episodeNumber: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    metadataHint?: AnimeMetadataHint
   ): Promise<{ sources: Array<StreamingSourceItem> }> {
     try {
-      const animeSession = await this.resolveAnimeSession(animeId, signal);
+      const animeSession = await this.resolveAnimeSession(animeId, signal, metadataHint);
       if (!animeSession || signal?.aborted) return { sources: [] };
 
       const episodes = await this.getEpisodes(animeSession, signal);
@@ -476,17 +549,113 @@ export class AnimePaheAdapterProvider implements StreamingProvider {
 }
 
 /**
+ * 0. Miruro Stream Adapter Provider
+ * Queries Miruro TV API via backend proxy (/api/miruro/episodes & /api/miruro/watch).
+ */
+export class MiruroAdapterProvider implements StreamingProvider {
+  readonly id = 'miruro';
+  readonly name = 'Miruro HLS & Multi-Source';
+
+  async getEpisodeSources(
+    animeId: string,
+    episodeNumber: number,
+    signal?: AbortSignal
+  ): Promise<{ sources: Array<StreamingSourceItem> }> {
+    const numericId = parseInt(animeId, 10);
+    if (isNaN(numericId) || numericId <= 0) return { sources: [] };
+
+    try {
+      const epRes = await fetch(`/api/miruro/episodes/${numericId}`, { signal });
+      if (!epRes.ok) return { sources: [] };
+      const epData = await epRes.json();
+      const epList = epData.episodes || [];
+      const match = epList.find((e: any) => e.number === episodeNumber) || epList[episodeNumber - 1];
+      if (!match) return { sources: [] };
+
+      const provider = (match.providers && match.providers[0]) || 'gogoanime';
+      const slug = match.slug || match.id || `ep-${episodeNumber}`;
+      const watchRes = await fetch(
+        `/api/miruro/watch/${encodeURIComponent(provider)}/${numericId}/sub/${encodeURIComponent(slug)}`,
+        { signal }
+      );
+      if (!watchRes.ok) return { sources: [] };
+      const watchData = await watchRes.json();
+      const rawSources = watchData.sources || [];
+
+      const sources: StreamingSourceItem[] = rawSources.map((s: any, idx: number) => ({
+        id: `miruro_${idx}`,
+        url: s.url,
+        embedUrl: s.type === 'iframe' ? s.url : undefined,
+        type: s.type === 'iframe' ? 'iframe' : (s.isM3U8 || s.url?.includes('.m3u8')) ? 'hls' : 'mp4',
+        quality: s.quality || '1080p',
+        language: 'Japanese (Sub)',
+        provider: s.provider || `Miruro (${provider})`,
+        isPrimary: idx === 0,
+        isOfficial: true,
+      }));
+
+      return { sources };
+    } catch (err: any) {
+      if (err.name === 'AbortError') throw err;
+      return { sources: [] };
+    }
+  }
+}
+
+export class AniEmbedAdapterProvider implements StreamingProvider {
+  readonly id = 'aniembed';
+  readonly name = 'AniEmbed';
+
+  async getEpisodeSources(
+    animeId: string,
+    episodeNumber: number,
+    _signal?: AbortSignal
+  ): Promise<{ sources: Array<StreamingSourceItem> }> {
+    const numId = parseInt(animeId, 10);
+    if (!numId || isNaN(numId) || numId <= 0) return { sources: [] };
+
+    try {
+      const url = getAniEmbedUrl({
+        anilistId: numId,
+        episode: episodeNumber,
+        lang: 'sub',
+        autoplay: true,
+      });
+
+      return {
+        sources: [
+          {
+            id: `aniembed_${numId}_e${episodeNumber}`,
+            url,
+            embedUrl: url,
+            type: 'iframe',
+            quality: '1080p',
+            language: 'Japanese (Sub)',
+            provider: 'AniEmbed',
+            isOfficial: true,
+          },
+        ],
+      };
+    } catch {
+      return { sources: [] };
+    }
+  }
+}
+
+/**
  * Streaming Provider Orchestrator
- * Prioritizes providers, attempts fallbacks, and maintains diagnostic records.
+ * Uses AniEmbed as the exclusive stream server.
  */
 export class StreamingProviderManager {
   private static instance: StreamingProviderManager;
   private providers: StreamingProvider[] = [
-    new AnimePaheAdapterProvider(),             // Priority 1: AnimePahe CoorenLabs
-    new ConfiguredPlaybackSourcesProvider(),    // Priority 2: Admin configured VCDN / media.cm
-    new CloudflareStreamAdapterProvider(),      // Priority 3: Cloudflare Stream
-    new AuthorizedServerStreamingProvider(),    // Priority 4: Authorized Server
-    new DatabaseStreamAdapterProvider(),        // Priority 5: Database Streams
+    new AniEmbedAdapterProvider(),              // Priority 0: AniEmbed Official Player
+    new MiruroAdapterProvider(),                // Priority 1: Miruro TV API Engine
+    new AnimePaheAdapterProvider(),             // Priority 2: AnimePahe CoorenLabs
+    new ConfiguredPlaybackSourcesProvider(),    // Priority 3: Admin configured VCDN / media.cm
+    new CloudflareStreamAdapterProvider(),      // Priority 4: Cloudflare Stream
+    new AuthorizedServerStreamingProvider(),    // Priority 5: Authorized Server
+    new DatabaseStreamAdapterProvider(),        // Priority 6: Database Streams
   ];
 
   public static getInstance(): StreamingProviderManager {

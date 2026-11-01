@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Search, X, Loader2, Star, Calendar, Tv } from 'lucide-react';
 import { AnimeMedia } from '../types/anime.ts';
 import { ClientAnimeService } from '../api/animeService.ts';
+import { MiruroAPI, MiruroSuggestion } from '../services/miruroApi.ts';
 
 interface SearchModalProps {
   isOpen: boolean;
@@ -12,6 +13,7 @@ interface SearchModalProps {
 export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, onSelectAnime }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<AnimeMedia[]>([]);
+  const [suggestions, setSuggestions] = useState<MiruroSuggestion[]>([]);
   const [loading, setLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [selectedFormat, setSelectedFormat] = useState<string>('ALL');
@@ -23,6 +25,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, onSel
     } else {
       setQuery('');
       setResults([]);
+      setSuggestions([]);
       setHasSearched(false);
     }
   }, [isOpen]);
@@ -37,6 +40,24 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, onSel
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
+  // Fetch instant autocomplete suggestions (max 8)
+  useEffect(() => {
+    if (!query.trim()) {
+      setSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    MiruroAPI.getSuggestions(query.trim())
+      .then((sugs) => {
+        if (!cancelled) setSuggestions(sugs);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [query]);
+
+  // Execute full search with debounce
   useEffect(() => {
     if (!query.trim()) {
       setResults([]);
@@ -49,19 +70,29 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, onSel
       setLoading(true);
       setHasSearched(true);
       try {
-        const data = await ClientAnimeService.searchAnime({
-          query: query.trim(),
-          format: selectedFormat !== 'ALL' ? selectedFormat : undefined,
-          perPage: 12,
-        });
-        setResults(data.media || []);
+        // Primary search via Miruro API
+        const miruroRes = await MiruroAPI.searchAnime(query.trim(), 1, 20);
+        if (miruroRes.media && miruroRes.media.length > 0) {
+          const filtered = selectedFormat !== 'ALL'
+            ? miruroRes.media.filter((m) => m.format === selectedFormat)
+            : miruroRes.media;
+          setResults(filtered);
+        } else {
+          // Fallback to client service
+          const data = await ClientAnimeService.searchAnime({
+            query: query.trim(),
+            format: selectedFormat !== 'ALL' ? selectedFormat : undefined,
+            perPage: 12,
+          });
+          setResults(data.media || []);
+        }
       } catch (err) {
         console.error('Search error:', err);
         setResults([]);
       } finally {
         setLoading(false);
       }
-    }, 300);
+    }, 250);
 
     return () => clearTimeout(timer);
   }, [query, selectedFormat]);
@@ -98,6 +129,25 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, onSel
             ESC
           </button>
         </div>
+
+        {/* Instant Suggestions Bar (Miruro Autocomplete) */}
+        {suggestions.length > 0 && (
+          <div className="flex items-center gap-1.5 px-4 py-2 border-b border-white/5 overflow-x-auto text-xs bg-black/20">
+            <span className="text-[10px] uppercase font-bold text-rose-400 shrink-0">Suggestions:</span>
+            {suggestions.map((sug) => (
+              <button
+                key={sug.id}
+                onClick={() => {
+                  onSelectAnime(sug.id);
+                  onClose();
+                }}
+                className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-rose-500/20 hover:text-rose-300 text-slate-300 text-[11px] font-medium transition-colors shrink-0 truncate max-w-[180px]"
+              >
+                {sug.title}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Filter chips */}
         <div className="flex items-center gap-1.5 px-4 py-2.5 border-b border-white/5 overflow-x-auto text-xs">

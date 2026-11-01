@@ -406,6 +406,29 @@ export async function getAnimeById(id: number | string): Promise<AniListMedia | 
   return null;
 }
 
+/**
+ * Get detailed anime info by MyAnimeList (MAL) ID
+ */
+export async function getAnimeByMalId(malId: number | string): Promise<AniListMedia | null> {
+  const numId = typeof malId === 'string' ? parseInt(malId, 10) : malId;
+  if (!numId || isNaN(numId)) return null;
+
+  const query = `
+    query ($idMal: Int) {
+      Media(idMal: $idMal, type: ANIME) {
+        ${DETAILED_MEDIA_FIELDS_FRAGMENT}
+      }
+    }
+  `;
+
+  try {
+    const data = await executeAniListQuery<{ Media: AniListMedia }>(query, { idMal: numId });
+    if (data?.Media) return data.Media;
+  } catch (_err) {}
+
+  return null;
+}
+
 export async function getAiringSchedule(days = 7): Promise<any[]> {
   const now = Math.floor(Date.now() / 1000);
   const end = now + days * 24 * 60 * 60;
@@ -462,5 +485,6 @@ export const AniListAPI = {
   getLatestAnime,
   searchAnime,
   getAnimeById,
+  getAnimeByMalId,
   getAiringSchedule,
 };

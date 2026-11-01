@@ -16,6 +16,11 @@ import {
   RefreshCw,
   Check,
   ExternalLink,
+  FastForward,
+  SkipForward,
+  SkipBack,
+  Subtitles,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { StreamingSourceItem, VideoDebugLog } from '../services/streamingProviderAdapter.ts';
 
@@ -39,7 +44,15 @@ export interface VideoPlayerProps {
   onEnded?: () => void;
   onNextEpisode?: () => void;
   hasNextEpisode?: boolean;
+  onPreviousEpisode?: () => void;
+  hasPreviousEpisode?: boolean;
+  intro?: { start: number; end: number };
+  outro?: { start: number; end: number };
+  subtitles?: Array<{ url: string; lang: string }>;
   onRetry?: () => void;
+  onSwitchProvider?: () => void;
+  onOpenExternal?: () => void;
+  loadingTimeoutMs?: number;
 }
 
 function redactTokens(url: string): string {
@@ -78,7 +91,14 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onEnded,
   onNextEpisode,
   hasNextEpisode = false,
+  onPreviousEpisode,
+  hasPreviousEpisode = false,
+  intro,
+  outro,
   onRetry,
+  onSwitchProvider,
+  onOpenExternal,
+  loadingTimeoutMs,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -97,9 +117,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [showControls, setShowControls] = useState(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [showServerMenu, setShowServerMenu] = useState(false);
+  const [showResolutionMenu, setShowResolutionMenu] = useState(false);
+  const [showSubtitleMenu, setShowSubtitleMenu] = useState(false);
+  const [levels, setLevels] = useState<Array<{ id: number; height: number; label: string }>>([]);
+  const [currentLevel, setCurrentLevel] = useState<number>(-1);
+  const [subtitleTracks, setSubtitleTracks] = useState<Array<{ id: number; lang: string; name: string }>>([]);
+  const [currentSubTrack, setCurrentSubTrack] = useState<number>(-1);
   const [showDebugModal, setShowDebugModal] = useState(false);
   const [initialSeekDone, setInitialSeekDone] = useState(false);
   const [playerState, setPlayerState] = useState<string>('Initializing');
+
+  const skipIntro = () => {
+    if (intro && videoRef.current) {
+      videoRef.current.currentTime = intro.end + 0.5;
+    }
+  };
+
+  const skipOutro = () => {
+    if (outro && videoRef.current) {
+      videoRef.current.currentTime = outro.end + 0.5;
+    }
+  };
 
   const controlsTimeoutRef = useRef<any>(null);
   const networkRetryCountRef = useRef<number>(0);
@@ -116,32 +154,72 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const isIframe = activeSource?.type === 'iframe' ||
     Boolean(embedUrl && embedUrl === activeUrl) ||
     activeUrl.includes('embed') ||
-    activeUrl.includes('vcdn.me') && !activeUrl.includes('.m3u8') ||
-    activeUrl.includes('media.cm') && !activeUrl.includes('.mp4');
+    (activeUrl.includes('vcdn.me') && !activeUrl.includes('.m3u8')) ||
+    (activeUrl.includes('media.cm') && !activeUrl.includes('.mp4'));
 
-  // 15-second loading watchdog (Requirement 5: Stop loading after 15 seconds)
+  // PostMessage listener for embed players (VidLink, plyr, iframe messengers)
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      try {
+        const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+        if (!data) return;
+        const evtType = data.event || data.type || data.status;
+        if (evtType === 'ready' || evtType === 'player_ready' || evtType === 'playback_ready') {
+          setIsLoading(false);
+          setPlayerState('Embed Player Ready');
+        } else if (evtType === 'play' || evtType === 'playing') {
+          setIsLoading(false);
+          setIsPlaying(true);
+          setPlayerState('Playing');
+        } else if (evtType === 'pause') {
+          setIsPlaying(false);
+        } else if (evtType === 'ended') {
+          setIsPlaying(false);
+          if (onEnded) onEnded();
+        } else if (evtType === 'timeupdate' && typeof data.currentTime === 'number') {
+          setCurrentTime(data.currentTime);
+          if (data.duration) setDuration(data.duration);
+          if (onProgress) onProgress(data.currentTime, data.duration || 0);
+        }
+      } catch {}
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => {
+      window.removeEventListener('message', handleMessage);
+    };
+  }, [onEnded, onProgress]);
+
+  // Configurable loading watchdog (25-second initialization timeout)
   useEffect(() => {
     if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
 
     if (isLoading && status === 'READY' && activeUrl) {
+      const timeoutMs = loadingTimeoutMs || (isIframe ? 25000 : 12000);
+      const timeoutSec = Math.round(timeoutMs / 1000);
+
+      if (activeUrl.includes('aniembed.se')) {
+        console.log(`[VIDEO PLAYER] Initializing AniEmbed (${redactTokens(activeUrl)})`);
+      }
+
       loadTimeoutRef.current = setTimeout(() => {
         if (isLoading) {
-          console.warn(`[VIDEO PLAYER] 15-second loading timeout exceeded for ${redactTokens(activeUrl)}`);
-          if (onSourceFallback && activeSourceIndex + 1 < sources.length) {
-            onSourceFallback(activeUrl, 'Timeout (15s exceeded)');
+          console.warn(`[VIDEO PLAYER] Initialization timeout after ${timeoutSec} seconds for ${redactTokens(activeUrl)}`);
+          if (onSourceFallback) {
+            onSourceFallback(activeUrl, `Timeout (${timeoutSec}s exceeded)`);
           } else {
-            setPlayerError('Stream loading timed out after 15 seconds. Please try another server or retry.');
+            setPlayerError(`Stream initialization timed out after ${timeoutSec} seconds. Try retrying, switching provider, or opening externally.`);
             setIsLoading(false);
-            setPlayerState('Fatal: 15s Loading Timeout');
+            setPlayerState(`Fatal: ${timeoutSec}s Initialization Timeout`);
           }
         }
-      }, 15000);
+      }, timeoutMs);
     }
 
     return () => {
       if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
     };
-  }, [isLoading, status, activeUrl, activeSourceIndex, sources.length, onSourceFallback]);
+  }, [isLoading, status, activeUrl, activeSourceIndex, sources.length, onSourceFallback, loadingTimeoutMs, isIframe]);
 
   // Setup video source & HLS (Only for non-iframe streams)
   useEffect(() => {
@@ -199,6 +277,22 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         setIsLoading(false);
         setPlayerState('Ready (Manifest Parsed)');
+        if (hls.levels && hls.levels.length > 0) {
+          const lvls = hls.levels.map((l: any, idx: number) => ({
+            id: idx,
+            height: l.height || 720,
+            label: l.height ? `${l.height}p` : `Level ${idx + 1}`,
+          }));
+          setLevels(lvls);
+        }
+        if (hls.subtitleTracks && hls.subtitleTracks.length > 0) {
+          const subs = hls.subtitleTracks.map((t: any, idx: number) => ({
+            id: idx,
+            lang: t.lang || t.name || 'Sub',
+            name: t.name || t.lang || `Track ${idx + 1}`,
+          }));
+          setSubtitleTracks(subs);
+        }
         if (initialTime > 0 && !initialSeekDone) {
           video.currentTime = initialTime;
           setInitialSeekDone(true);
@@ -552,7 +646,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">{desc}</p>
           </div>
 
-          <div className="flex items-center justify-center gap-3 pt-2">
+          <div className="flex items-center justify-center gap-2.5 pt-2 flex-wrap">
             {onRetry && (
               <button
                 onClick={() => {
@@ -567,16 +661,23 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               </button>
             )}
 
-            {sources.length > 1 && (
+            {onSwitchProvider && (
               <button
-                onClick={() => {
-                  const nextIdx = (activeSourceIndex + 1) % sources.length;
-                  if (onSelectSource) onSelectSource(nextIdx);
-                }}
+                onClick={onSwitchProvider}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold text-white transition-colors"
               >
                 <Server className="w-3.5 h-3.5 text-rose-400" />
-                <span>Try Next Server</span>
+                <span>Switch Provider</span>
+              </button>
+            )}
+
+            {onOpenExternal && (
+              <button
+                onClick={onOpenExternal}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold text-white transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-sky-400" />
+                <span>Open External Player</span>
               </button>
             )}
 
@@ -643,15 +744,29 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       {/* 1. Official Iframe Player Viewport (VCDN / media.cm / embeds) */}
       {isIframe ? (
         <iframe
+          id="anime-player"
+          key={activeUrl}
           ref={iframeRef}
           src={activeUrl}
           title={title || `Episode ${episodeNumber}`}
+          frameBorder={0}
+          allow="autoplay; fullscreen; picture-in-picture; accelerometer; gyroscope; clipboard-write; encrypted-media"
+          allowFullScreen
+          scrolling="no"
+          style={{
+            width: "100%",
+            height: "100%",
+            aspectRatio: "16 / 9",
+            border: 0,
+          }}
           className="w-full h-full border-0 bg-black"
-          allow="autoplay; fullscreen; encrypted-media; picture-in-picture; accelerometer; gyroscope; clipboard-write"
           referrerPolicy="no-referrer"
           onLoad={() => {
-            setIsLoading(false);
-            setPlayerState('Iframe Player Loaded');
+            console.log('[VIDEO PLAYER] Iframe loaded; playback not yet confirmed');
+            setPlayerState('Iframe Loaded (Playback Unconfirmed)');
+            setTimeout(() => {
+              setIsLoading(false);
+            }, 2000);
           }}
           onError={() => {
             console.error('[VIDEO PLAYER] Iframe failed to load');
@@ -763,6 +878,27 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         )}
       </div>
 
+      {/* 4.5. Floating Skip Intro & Skip Outro Buttons */}
+      {!isIframe && intro && currentTime >= intro.start && currentTime <= intro.end && (
+        <button
+          onClick={skipIntro}
+          className="absolute bottom-20 right-6 z-30 px-4 py-2 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white text-xs font-bold shadow-2xl flex items-center gap-1.5 transition-all transform hover:scale-105 backdrop-blur-md"
+        >
+          <FastForward className="w-4 h-4" />
+          <span>Skip Intro</span>
+        </button>
+      )}
+
+      {!isIframe && outro && currentTime >= outro.start && currentTime <= outro.end && (
+        <button
+          onClick={skipOutro}
+          className="absolute bottom-20 right-6 z-30 px-4 py-2 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white text-xs font-bold shadow-2xl flex items-center gap-1.5 transition-all transform hover:scale-105 backdrop-blur-md"
+        >
+          <FastForward className="w-4 h-4" />
+          <span>Skip Outro</span>
+        </button>
+      )}
+
       {/* 5. Center Play Button for native video (when paused) */}
       {!isIframe && !isPlaying && !isLoading && (
         <div
@@ -796,6 +932,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
           <div className="flex items-center justify-between text-xs font-mono text-white pt-1">
             <div className="flex items-center gap-3">
+              {hasPreviousEpisode && onPreviousEpisode && (
+                <button
+                  onClick={onPreviousEpisode}
+                  className="p-1 hover:text-rose-400 transition-colors"
+                  title="Previous Episode"
+                >
+                  <SkipBack className="w-4 h-4" />
+                </button>
+              )}
+
               <button
                 onClick={togglePlay}
                 className="p-1 hover:text-rose-400 transition-colors"
@@ -807,10 +953,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               {hasNextEpisode && onNextEpisode && (
                 <button
                   onClick={onNextEpisode}
-                  className="p-1 hover:text-rose-400 transition-colors hidden sm:inline"
+                  className="p-1 hover:text-rose-400 transition-colors"
                   title="Next Episode"
                 >
-                  <RotateCcw className="w-4 h-4 scale-x-[-1]" />
+                  <SkipForward className="w-4 h-4" />
                 </button>
               )}
 
@@ -837,6 +983,100 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
             </div>
 
             <div className="flex items-center gap-3">
+              {/* Resolution / Quality Menu */}
+              {levels.length > 0 && (
+                <div className="relative">
+                  <button
+                    onClick={() => setShowResolutionMenu(!showResolutionMenu)}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-[11px] font-bold transition-colors"
+                    title="Select Resolution"
+                  >
+                    <SlidersHorizontal className="w-3 h-3 text-rose-400" />
+                    <span>{currentLevel === -1 ? 'Auto' : levels[currentLevel]?.label || 'Quality'}</span>
+                  </button>
+                  {showResolutionMenu && (
+                    <div className="absolute right-0 bottom-full mb-2 w-28 rounded-xl bg-[#0e1017] border border-white/10 shadow-xl p-1 z-40">
+                      <button
+                        onClick={() => {
+                          setCurrentLevel(-1);
+                          if (hlsRef.current) hlsRef.current.currentLevel = -1;
+                          setShowResolutionMenu(false);
+                        }}
+                        className={`w-full text-left px-2 py-1 rounded text-xs transition-colors flex items-center justify-between ${
+                          currentLevel === -1 ? 'text-rose-400 font-bold bg-white/5' : 'text-slate-300 hover:bg-white/5'
+                        }`}
+                      >
+                        <span>Auto</span>
+                        {currentLevel === -1 && <Check className="w-3 h-3 text-rose-400" />}
+                      </button>
+                      {levels.map((lvl) => (
+                        <button
+                          key={lvl.id}
+                          onClick={() => {
+                            setCurrentLevel(lvl.id);
+                            if (hlsRef.current) hlsRef.current.currentLevel = lvl.id;
+                            setShowResolutionMenu(false);
+                          }}
+                          className={`w-full text-left px-2 py-1 rounded text-xs transition-colors flex items-center justify-between ${
+                            currentLevel === lvl.id ? 'text-rose-400 font-bold bg-white/5' : 'text-slate-300 hover:bg-white/5'
+                          }`}
+                        >
+                          <span>{lvl.label}</span>
+                          {currentLevel === lvl.id && <Check className="w-3 h-3 text-rose-400" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Subtitles Menu */}
+              {subtitleTracks.length > 0 && (
+                <div className="relative">
+                  <button
+                    onClick={() => setShowSubtitleMenu(!showSubtitleMenu)}
+                    className="p-1 rounded bg-white/10 hover:bg-white/20 text-[11px] font-bold transition-colors"
+                    title="Select Subtitle Track"
+                  >
+                    <Subtitles className={`w-3.5 h-3.5 ${currentSubTrack !== -1 ? 'text-rose-400' : 'text-slate-300'}`} />
+                  </button>
+                  {showSubtitleMenu && (
+                    <div className="absolute right-0 bottom-full mb-2 w-32 rounded-xl bg-[#0e1017] border border-white/10 shadow-xl p-1 z-40">
+                      <button
+                        onClick={() => {
+                          setCurrentSubTrack(-1);
+                          if (hlsRef.current) hlsRef.current.subtitleTrack = -1;
+                          setShowSubtitleMenu(false);
+                        }}
+                        className={`w-full text-left px-2 py-1 rounded text-xs transition-colors flex items-center justify-between ${
+                          currentSubTrack === -1 ? 'text-rose-400 font-bold bg-white/5' : 'text-slate-300 hover:bg-white/5'
+                        }`}
+                      >
+                        <span>Off</span>
+                        {currentSubTrack === -1 && <Check className="w-3 h-3 text-rose-400" />}
+                      </button>
+                      {subtitleTracks.map((sub) => (
+                        <button
+                          key={sub.id}
+                          onClick={() => {
+                            setCurrentSubTrack(sub.id);
+                            if (hlsRef.current) hlsRef.current.subtitleTrack = sub.id;
+                            setShowSubtitleMenu(false);
+                          }}
+                          className={`w-full text-left px-2 py-1 rounded text-xs transition-colors flex items-center justify-between ${
+                            currentSubTrack === sub.id ? 'text-rose-400 font-bold bg-white/5' : 'text-slate-300 hover:bg-white/5'
+                          }`}
+                        >
+                          <span className="truncate">{sub.name}</span>
+                          {currentSubTrack === sub.id && <Check className="w-3 h-3 text-rose-400" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Playback Speed */}
               <div className="relative">
                 <button
                   onClick={() => setShowSpeedMenu(!showSpeedMenu)}

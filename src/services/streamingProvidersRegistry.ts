@@ -1,3 +1,5 @@
+import { getAniEmbedUrl } from './aniembedService.ts';
+
 /**
  * Central Streaming Provider Registry for KURO NAMI
  * 
@@ -27,11 +29,70 @@ export interface StreamingProviderConfig {
     season?: number;
     isMovie?: boolean;
     customEmbedUrl?: string;
+    autoplay?: boolean;
+    startTime?: number;
   }) => string | null;
 }
 
 export const STREAMING_PROVIDERS_REGISTRY: StreamingProviderConfig[] = [
-  // 1. VidLink (Recommended)
+  // 0. AniEmbed (Primary Official Player)
+  {
+    id: 'aniembed',
+    name: 'AniEmbed',
+    enabled: true,
+    requiredIdType: 'anilist_id',
+    supportedLanguages: ['sub', 'dub'],
+    allowedOrigins: ['https://aniembed.se'],
+    badge: 'Primary',
+    notes: 'AniEmbed official streaming player (https://aniembed.se/)',
+    buildUrl: ({ anilistId, episodeNumber, language, autoplay = true, startTime = 0 }) => {
+      if (!anilistId || Number(anilistId) <= 0) return null;
+      const lang = language === 'dub' ? 'dub' : 'sub';
+      return getAniEmbedUrl({
+        anilistId: Number(anilistId),
+        episode: Number(episodeNumber || 1),
+        lang,
+        autoplay,
+        startTime,
+      });
+    },
+  },
+
+  // 1. Ani MegaPlay
+  {
+    id: 'animegaplay',
+    name: 'Ani MegaPlay',
+    enabled: true,
+    requiredIdType: 'anilist_id',
+    supportedLanguages: ['sub', 'dub'],
+    allowedOrigins: ['https://ani.megaplay.su'],
+    badge: 'MegaPlay',
+    notes: 'Ani MegaPlay streaming player (https://ani.megaplay.su/)',
+    buildUrl: ({ anilistId, episodeNumber, language }) => {
+      if (!anilistId) return null;
+      const lang = language === 'dub' ? 'dub' : 'sub';
+      return `https://ani.megaplay.su/embed/${anilistId}/${episodeNumber}/${lang}`;
+    },
+  },
+
+  // 2. Miruro Stream Engine
+  {
+    id: 'miruro',
+    name: 'Miruro HLS',
+    enabled: true,
+    requiredIdType: 'anilist_id',
+    supportedLanguages: ['sub', 'dub'],
+    allowedOrigins: ['https://mirurotvapi.vercel.app', 'https://miruro.tv', 'https://vidlink.pro'],
+    badge: 'Miruro',
+    notes: 'Primary MiruroTVAPI streaming engine',
+    buildUrl: ({ anilistId, episodeNumber, language }) => {
+      if (!anilistId) return null;
+      const cat = language === 'dub' ? 'dub' : 'sub';
+      return `/api/miruro/watch/gogoanime/${anilistId}/${cat}/ep-${episodeNumber}`;
+    },
+  },
+
+  // 3. VidLink
   {
     id: 'vidlink',
     name: 'VidLink',
@@ -39,14 +100,18 @@ export const STREAMING_PROVIDERS_REGISTRY: StreamingProviderConfig[] = [
     requiredIdType: 'any',
     supportedLanguages: ['sub', 'dub'],
     allowedOrigins: ['https://vidlink.pro'],
-    badge: 'Recommended',
-    notes: 'Primary high-speed stream player (Supports TMDB & MAL IDs)',
-    buildUrl: ({ malId, tmdbId, episodeNumber, language, season = 1, isMovie }) => {
+    badge: 'VidLink',
+    notes: 'VidLink stream engine (Supports TMDB & MAL IDs)',
+    buildUrl: ({ malId, anilistId, tmdbId, episodeNumber, language, season = 1, isMovie }) => {
       if (tmdbId) {
         if (isMovie) return `https://vidlink.pro/movie/${tmdbId}`;
         return `https://vidlink.pro/tv/${tmdbId}/${season}/${episodeNumber}`;
       }
-      if (malId && malId > 0) {
+      if (anilistId && Number(anilistId) > 0) {
+        const lang = language === 'dub' ? 'dub' : 'sub';
+        return `https://vidlink.pro/anime/${anilistId}/${episodeNumber}/${lang}`;
+      }
+      if (malId && Number(malId) > 0) {
         const lang = language === 'dub' ? 'dub' : 'sub';
         return `https://vidlink.pro/anime/${malId}/${episodeNumber}/${lang}`;
       }
@@ -54,50 +119,16 @@ export const STREAMING_PROVIDERS_REGISTRY: StreamingProviderConfig[] = [
     },
   },
 
-  // 2. VidLink 2
-  {
-    id: 'vidlink2',
-    name: 'VidLink 2',
-    enabled: true,
-    requiredIdType: 'tmdb_id',
-    supportedLanguages: ['sub', 'dub'],
-    allowedOrigins: ['https://vidlink.pro'],
-    badge: 'Embed Pro',
-    notes: 'Secondary VidLink embed player (Supports Movies & Series by TMDB ID)',
-    buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (!tmdbId) return null;
-      if (isMovie) return `https://vidlink.pro/embed/movie/${tmdbId}`;
-      return `https://vidlink.pro/embed/tv/${tmdbId}/${season}/${episodeNumber}`;
-    },
-  },
-
-  // 3. SuperEmbed
-  {
-    id: 'superembed',
-    name: 'SuperEmbed',
-    enabled: true,
-    requiredIdType: 'tmdb_id',
-    supportedLanguages: ['sub', 'dub'],
-    allowedOrigins: ['https://multiembed.mov', 'https://superembed.stream', 'https://seapi.link'],
-    badge: 'MultiEmbed',
-    notes: 'Multi-host streaming embed player with auto-backup servers',
-    buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (!tmdbId) return null;
-      if (isMovie) return `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1`;
-      return `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1&s=${season}&e=${episodeNumber}`;
-    },
-  },
-
-  // 4. VidSrc 5 (Recommended)
+  // 4. VidSrc 5
   {
     id: 'vidsrc5',
     name: 'VidSrc 5',
     enabled: true,
     requiredIdType: 'tmdb_id',
     supportedLanguages: ['sub', 'dub'],
-    allowedOrigins: ['https://vidsrc.cc', 'https://vidsrc.pro', 'https://vidsrc.vip', 'https://vidsrc.me', 'https://vidsrc.xyz'],
-    badge: 'Recommended',
-    notes: 'VidSrc v2/v5 high quality stream cluster',
+    allowedOrigins: ['https://vidsrc.cc', 'https://vidsrc.pro', 'https://vidsrc.vip', 'https://vidsrc.me'],
+    badge: 'VidSrc',
+    notes: 'VidSrc v2/v5 stream cluster',
     buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
       if (!tmdbId) return null;
       if (isMovie) return `https://vidsrc.cc/v2/embed/movie/${tmdbId}`;
@@ -105,203 +136,20 @@ export const STREAMING_PROVIDERS_REGISTRY: StreamingProviderConfig[] = [
     },
   },
 
-  // 5. VidSrc 2
-  {
-    id: 'vidsrc2',
-    name: 'VidSrc 2',
-    enabled: true,
-    requiredIdType: 'tmdb_id',
-    supportedLanguages: ['sub'],
-    allowedOrigins: ['https://vidsrc2.to'],
-    badge: 'VidSrc.to',
-    notes: 'VidSrc2 direct embed player',
-    buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (!tmdbId) return null;
-      if (isMovie) return `https://vidsrc2.to/embed/movie/${tmdbId}`;
-      return `https://vidsrc2.to/embed/tv/${tmdbId}/${season}/${episodeNumber}`;
-    },
-  },
-
-  // 6. AutoEmbed 1
-  {
-    id: 'autoembed1',
-    name: 'AutoEmbed 1',
-    enabled: true,
-    requiredIdType: 'tmdb_id',
-    supportedLanguages: ['sub', 'dub'],
-    allowedOrigins: ['https://player.autoembed.cc'],
-    badge: 'Player CC',
-    notes: 'Fast AutoEmbed player endpoint 1',
-    buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (!tmdbId) return null;
-      if (isMovie) return `https://player.autoembed.cc/embed/movie/${tmdbId}`;
-      return `https://player.autoembed.cc/embed/tv/${tmdbId}/${season}/${episodeNumber}`;
-    },
-  },
-
-  // 7. AutoEmbed 2
-  {
-    id: 'autoembed2',
-    name: 'AutoEmbed 2',
-    enabled: true,
-    requiredIdType: 'tmdb_id',
-    supportedLanguages: ['sub'],
-    allowedOrigins: ['https://autoembed.co'],
-    badge: 'AutoEmbed.co',
-    notes: 'Alternative AutoEmbed endpoint 2',
-    buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (!tmdbId) return null;
-      if (isMovie) return `https://autoembed.co/movie/tmdb/${tmdbId}`;
-      return `https://autoembed.co/tv/tmdb/${tmdbId}-${season}-${episodeNumber}`;
-    },
-  },
-
-  // 8. 2embed.cc
-  {
-    id: 'twoembed',
-    name: '2embed.cc',
-    enabled: true,
-    requiredIdType: 'tmdb_id',
-    supportedLanguages: ['sub'],
-    allowedOrigins: ['https://www.2embed.cc'],
-    badge: '2embed',
-    notes: '2embed stream engine',
-    buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (!tmdbId) return null;
-      if (isMovie) return `https://www.2embed.cc/embed/${tmdbId}`;
-      return `https://www.2embed.cc/embedtv/${tmdbId}&s=${season}&e=${episodeNumber}`;
-    },
-  },
-
-  // 9. MoviesAPI
-  {
-    id: 'moviesapi',
-    name: 'MoviesAPI',
-    enabled: true,
-    requiredIdType: 'tmdb_id',
-    supportedLanguages: ['sub'],
-    allowedOrigins: ['https://moviesapi.club'],
-    badge: 'Club',
-    notes: 'MoviesAPI.club stream player',
-    buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (!tmdbId) return null;
-      if (isMovie) return `https://moviesapi.club/movie/${tmdbId}`;
-      return `https://moviesapi.club/tv/${tmdbId}-${season}-${episodeNumber}`;
-    },
-  },
-
-  // 10. FilmKu
-  {
-    id: 'filmku',
-    name: 'FilmKu',
-    enabled: true,
-    requiredIdType: 'tmdb_id',
-    supportedLanguages: ['sub'],
-    allowedOrigins: ['https://filmku.stream', 'https://filmku.org'],
-    badge: 'Stream',
-    notes: 'FilmKu player embed',
-    buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (!tmdbId) return null;
-      if (isMovie) return `https://filmku.stream/movie/${tmdbId}`;
-      return `https://filmku.stream/tv/${tmdbId}/${season}/${episodeNumber}`;
-    },
-  },
-
-  // 11. NontonGo
-  {
-    id: 'nontongo',
-    name: 'NontonGo',
-    enabled: true,
-    requiredIdType: 'any',
-    supportedLanguages: ['sub'],
-    allowedOrigins: ['https://nontongo.win', 'https://www.nontongo.win'],
-    badge: 'AniList/TMDB',
-    notes: 'NontonGo anime & Asian media player',
-    buildUrl: ({ anilistId, tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (anilistId && !isMovie) {
-        return `https://nontongo.win/anime/${anilistId}/${episodeNumber}/play`;
-      }
-      if (tmdbId) {
-        if (isMovie) return `https://www.nontongo.win/embed/movie/${tmdbId}`;
-        return `https://www.nontongo.win/embed/tv/${tmdbId}/${season}/${episodeNumber}`;
-      }
-      return null;
-    },
-  },
-
-  // 12. <Embed> (Custom Embed)
-  {
-    id: 'custom_embed',
-    name: '<Embed>',
-    enabled: true,
-    requiredIdType: 'custom',
-    supportedLanguages: ['sub', 'dub'],
-    allowedOrigins: ['*'],
-    badge: 'Custom Frame',
-    notes: 'Custom user or administrator defined iframe player',
-    buildUrl: ({ customEmbedUrl }) => {
-      if (customEmbedUrl && (customEmbedUrl.startsWith('http://') || customEmbedUrl.startsWith('https://'))) {
-        return customEmbedUrl;
-      }
-      return null;
-    },
-  },
-
-  // 13. embed.smashystream.com
-  {
-    id: 'smashystream',
-    name: 'SmashyStream',
-    enabled: true,
-    requiredIdType: 'tmdb_id',
-    supportedLanguages: ['sub'],
-    allowedOrigins: ['https://embed.smashystream.com'],
-    badge: 'Smashy',
-    notes: 'SmashyStream player endpoint',
-    buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (!tmdbId) return null;
-      if (isMovie) return `https://embed.smashystream.com/playere.php?tmdb=${tmdbId}`;
-      return `https://embed.smashystream.com/playere.php?tmdb=${tmdbId}&season=${season}&episode=${episodeNumber}`;
-    },
-  },
-
-  // 14. databasegdriveplayer.xyz
-  {
-    id: 'databasegdriveplayer',
-    name: 'DatabaseGdrivePlayer',
-    enabled: true,
-    requiredIdType: 'tmdb_id',
-    supportedLanguages: ['sub'],
-    allowedOrigins: ['https://databasegdriveplayer.xyz'],
-    badge: 'GDrivePlayer',
-    notes: 'Gdrive Player stream endpoint',
-    buildUrl: ({ tmdbId, episodeNumber, season = 1, isMovie }) => {
-      if (!tmdbId) return null;
-      if (isMovie) return `https://databasegdriveplayer.xyz/player.php?tmdb=${tmdbId}`;
-      return `https://databasegdriveplayer.xyz/player.php?type=series&tmdb=${tmdbId}&season=${season}&episode=${episodeNumber}`;
-    },
-  },
-
-  // 15. AnimePahe via animepahe.pw (Direct HLS/MP4 & Kwik embeds)
+  // 5. AnimePahe via CoorenLabs
   {
     id: 'animepahe',
     name: 'AnimePahe',
     enabled: true,
     requiredIdType: 'anilist_id',
     supportedLanguages: ['sub', 'dub'],
-    allowedOrigins: [
-      'https://animepahe.pw',
-      'https://kwik.cx',
-      'https://pahe.win',
-      'https://animepahe.org',
-      'https://animepahe.com',
-      'https://coorenlabs-2.onrender.com',
-    ],
-    badge: 'animepahe.pw',
-    notes: 'Official AnimePahe (animepahe.pw) & Kwik stream server',
+    allowedOrigins: ['https://animepahe.pw', 'https://kwik.cx', 'https://pahe.win'],
+    badge: 'AnimePahe',
+    notes: 'Official AnimePahe (animepahe.pw) stream server',
     buildUrl: () => null,
   },
 
-  // 16. Studio Master
+  // 6. Studio Master / VCDN / media.cm
   {
     id: 'configured_master',
     name: 'Studio Master',
@@ -309,9 +157,27 @@ export const STREAMING_PROVIDERS_REGISTRY: StreamingProviderConfig[] = [
     requiredIdType: 'anilist_id',
     supportedLanguages: ['sub', 'dub'],
     allowedOrigins: ['*'],
-    badge: 'Studio Master',
-    notes: 'Administrator configured playback streams',
+    badge: 'VCDN / media.cm',
+    notes: 'Licensed playback streams configured by administrators',
     buildUrl: () => null,
+  },
+
+  // 7. Custom Frame
+  {
+    id: 'custom_embed',
+    name: '<Embed>',
+    enabled: true,
+    requiredIdType: 'custom',
+    supportedLanguages: ['sub', 'dub'],
+    allowedOrigins: ['*'],
+    badge: 'Custom',
+    notes: 'Custom direct iframe embed player',
+    buildUrl: ({ customEmbedUrl }) => {
+      if (customEmbedUrl && (customEmbedUrl.startsWith('http://') || customEmbedUrl.startsWith('https://'))) {
+        return customEmbedUrl;
+      }
+      return null;
+    },
   },
 ];
 

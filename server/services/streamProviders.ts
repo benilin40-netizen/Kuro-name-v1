@@ -352,6 +352,125 @@ export async function getToonStreamEpisodeSources(slug: string, season = 1, epis
 }
 
 /* ==========================================================================
+   AnimeKai Provider Routes (CoorenLabs)
+   Documented routes:
+   - GET /anime/animekai/search/:query
+   - GET /anime/animekai/info/:id
+   - GET /anime/animekai/episodes/:id
+   - GET /anime/animekai/episode/:id/:session
+   ========================================================================== */
+
+export async function searchAnimeKai(query: string, customBaseUrl?: string): Promise<any[]> {
+  const baseUrl = (customBaseUrl || getCoorenLabsBaseUrl()).trim().replace(/\/+$/, '');
+  if (!baseUrl) {
+    throw new Error('COOREN_API_BASE_URL is not configured.');
+  }
+
+  const encodedQuery = encodeURIComponent(query.trim());
+  const res = await fetch(`${baseUrl}/anime/animekai/search/${encodedQuery}`, {
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`CoorenLabs AnimeKai search failed with HTTP ${res.status}: ${errText}`);
+  }
+
+  const data = await res.json();
+  return Array.isArray(data) ? data : data?.results || [];
+}
+
+export async function getAnimeKaiInfo(id: string, customBaseUrl?: string): Promise<any> {
+  const baseUrl = (customBaseUrl || getCoorenLabsBaseUrl()).trim().replace(/\/+$/, '');
+  if (!baseUrl) {
+    throw new Error('COOREN_API_BASE_URL is not configured.');
+  }
+
+  const res = await fetch(`${baseUrl}/anime/animekai/info/${encodeURIComponent(id.trim())}`, {
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch AnimeKai info for ID "${id}" (HTTP ${res.status})`);
+  }
+
+  return await res.json();
+}
+
+export async function getAnimeKaiEpisodes(id: string, customBaseUrl?: string): Promise<any[]> {
+  const baseUrl = (customBaseUrl || getCoorenLabsBaseUrl()).trim().replace(/\/+$/, '');
+  if (!baseUrl) {
+    throw new Error('COOREN_API_BASE_URL is not configured.');
+  }
+
+  const res = await fetch(`${baseUrl}/anime/animekai/episodes/${encodeURIComponent(id.trim())}`, {
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch AnimeKai episodes (HTTP ${res.status})`);
+  }
+
+  const data = await res.json();
+  return Array.isArray(data) ? data : data?.results || data?.episodes || [];
+}
+
+export async function getAnimeKaiStreams(id: string, session: string, customBaseUrl?: string): Promise<StreamVariantOption[]> {
+  const baseUrl = (customBaseUrl || getCoorenLabsBaseUrl()).trim().replace(/\/+$/, '');
+  if (!baseUrl) {
+    throw new Error('COOREN_API_BASE_URL is not configured.');
+  }
+
+  // Support both /episode/:id/:session and /watch/:id/:session
+  let res = await fetch(`${baseUrl}/anime/animekai/episode/${encodeURIComponent(id.trim())}/${encodeURIComponent(session.trim())}`, {
+    signal: AbortSignal.timeout(20000),
+  }).catch(() => null);
+
+  if (!res || !res.ok) {
+    res = await fetch(`${baseUrl}/anime/animekai/watch/${encodeURIComponent(id.trim())}/${encodeURIComponent(session.trim())}`, {
+      signal: AbortSignal.timeout(20000),
+    });
+  }
+
+  if (!res || !res.ok) {
+    throw new Error(`Failed to fetch AnimeKai episode streams (HTTP ${res?.status || 500})`);
+  }
+
+  const text = await res.text();
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const variants: StreamVariantOption[] = [];
+
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line);
+      const quality = parsed.quality || parsed.resolution || '720p';
+      const audioRaw = (parsed.audio || parsed.language || 'jpn').toLowerCase();
+      const language = audioRaw.includes('eng') || audioRaw.includes('dub') ? 'dub' : 'sub';
+
+      const proxiedUrl = fixProxiedUrl(parsed.proxiedUrl || parsed.proxyUrl, baseUrl);
+      const directUrl = fixProxiedUrl(parsed.directUrl || parsed.hlsUrl, baseUrl);
+      const rawUrl = fixProxiedUrl(parsed.url || parsed.embedUrl, baseUrl);
+      const chosenUrl = proxiedUrl || directUrl || rawUrl;
+      if (!chosenUrl) continue;
+
+      variants.push({
+        title: parsed.title || undefined,
+        quality,
+        language,
+        proxiedUrl,
+        directUrl,
+        url: chosenUrl,
+        downloadUrl: fixProxiedUrl(parsed.downloadUrl, baseUrl),
+        provider: 'animekai',
+        session,
+        headers: parsed.corsHeaders || undefined,
+      });
+    } catch {
+      // Safely ignore malformed or partial NDJSON lines
+    }
+  }
+
+  return variants;
+}
+
+/* ==========================================================================
    Security & URL Validation (SSRF Protection)
    ========================================================================== */
 

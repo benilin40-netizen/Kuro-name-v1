@@ -11,6 +11,7 @@ import { Footer } from './components/Footer.tsx';
 import { SearchModal } from './components/SearchModal.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
 import { VideoPlayerModal } from './components/VideoPlayerModal.tsx';
+import { TraceMoeSearchModal } from './components/TraceMoeSearchModal.tsx';
 import { AnimeMedia } from './types/anime.ts';
 import { ClientAnimeService } from './api/animeService.ts';
 
@@ -49,6 +50,9 @@ export default function App() {
 
   // Search Modal state
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  // Trace.moe Screenshot Finder Modal state
+  const [isTraceMoeOpen, setIsTraceMoeOpen] = useState(false);
 
   // Public Catalog State & Functions
   const [catalogMedia, setCatalogMedia] = useState<AnimeMedia[]>([]);
@@ -228,6 +232,7 @@ export default function App() {
           currentTab={currentTab}
           onNavigate={handleNavigate}
           onOpenSearch={() => setIsSearchOpen(true)}
+          onOpenTraceMoe={() => setIsTraceMoeOpen(true)}
         />
 
         {/* Main Content Area */}
@@ -429,6 +434,18 @@ export default function App() {
           isOpen={isSearchOpen}
           onClose={() => setIsSearchOpen(false)}
           onSelectAnime={handleSelectAnime}
+        />
+
+        <TraceMoeSearchModal
+          isOpen={isTraceMoeOpen}
+          onClose={() => setIsTraceMoeOpen(false)}
+          onSelectAnime={(anilistId, epNum) => {
+            if (epNum && epNum > 0) {
+              handleWatchAnime(anilistId, epNum);
+            } else {
+              handleSelectAnime(anilistId);
+            }
+          }}
         />
 
         <AuthModal />

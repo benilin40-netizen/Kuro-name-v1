@@ -37,9 +37,39 @@ export interface NormalizedAnimeIDs {
   anilist?: number;
 }
 
+export interface AnimeExternalIds {
+  anilistId: number | null;
+  malId: number | null;
+  kitsuId: string | null;
+  tmdbId: number | null;
+}
+
+export interface TraceMoeResultItem {
+  anilist: number | { id: number; title: { romaji: string; english: string | null; native: string | null }; coverImage: { large: string } };
+  filename: string;
+  episode: number | string | null;
+  from: number;
+  to: number;
+  similarity: number;
+  video: string;
+  image: string;
+}
+
+export interface ApiIntegrationStatus {
+  name: string;
+  endpoint: string;
+  status: 'healthy' | 'degraded' | 'offline' | 'unknown';
+  latencyMs: number;
+  lastSuccess: string | null;
+  lastError: string | null;
+  requestCount: number;
+  failedCount: number;
+}
+
 export interface AnimeMedia {
   id: number;
   idMal?: number | null;
+  externalIds?: AnimeExternalIds;
   ids?: NormalizedAnimeIDs;
   title: AnimeTitle;
   description: string | null;

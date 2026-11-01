@@ -4,6 +4,7 @@ import { ClientAnimeService } from '../api/animeService.ts';
 import { CountdownTimer, formatAiringDate } from '../components/CountdownTimer.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
 import { findTMDBByTitle, TMDBMediaDetails, TMDBCastMember } from '../services/tmdbService.ts';
+import { resolveCanonicalIdentity } from '../services/canonicalAnimeResolver.ts';
 import {
   Star,
   Bookmark,
@@ -143,8 +144,10 @@ export const AnimeDetailsView: React.FC<AnimeDetailsViewProps> = ({
 
   const studioName = anime.studios?.nodes?.[0]?.name || 'Unknown Studio';
 
-  const posterImg = tmdbData?.poster_url || anime.coverImage.extraLarge || anime.coverImage.large;
-  const backdropImg = tmdbData?.backdrop_url || anime.bannerImage || anime.coverImage.extraLarge;
+  const canonicalIdentity = resolveCanonicalIdentity(anime);
+  // Poster Image MUST ALWAYS come from verified canonical anime record
+  const posterImg = canonicalIdentity.posterUrl || undefined;
+  const backdropImg = canonicalIdentity.bannerUrl || tmdbData?.backdrop_url || canonicalIdentity.posterUrl || undefined;
 
   const handleStatusChange = (status: string) => {
     if (!user) {
@@ -575,6 +578,40 @@ export const AnimeDetailsView: React.FC<AnimeDetailsViewProps> = ({
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* Recommended Anime Section */}
+          {anime.recommendations?.nodes && anime.recommendations.nodes.length > 0 && (
+            <div>
+              <h3 className="text-sm font-bold uppercase tracking-wider text-slate-300 mb-4">
+                Recommended For You
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-4">
+                {anime.recommendations.nodes
+                  .filter((n: any) => Boolean(n.mediaRecommendation))
+                  .map((rec: any, idx: number) => {
+                    const item = rec.mediaRecommendation;
+                    return (
+                      <div
+                        key={idx}
+                        onClick={() => onSelectAnime(item.id)}
+                        className="p-2.5 rounded-2xl bg-[#0e111a] border border-white/5 hover:border-rose-500/30 cursor-pointer transition-all hover:-translate-y-1 group"
+                      >
+                        <img
+                          src={item.coverImage.medium || item.coverImage.large}
+                          alt={item.title.romaji || item.title.english}
+                          className="aspect-[3/4.2] w-full object-cover rounded-xl mb-2"
+                          loading="lazy"
+                        />
+                        <div className="text-[10px] font-bold text-slate-400">{item.format || 'TV'}</div>
+                        <div className="text-xs font-semibold text-white group-hover:text-rose-400 truncate">
+                          {item.title.english || item.title.romaji}
+                        </div>
+                      </div>
+                    );
+                  })}
               </div>
             </div>
           )}

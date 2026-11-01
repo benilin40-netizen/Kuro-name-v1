@@ -17,15 +17,17 @@ import {
   X,
   Tv,
   Waves,
+  Camera,
 } from 'lucide-react';
 
 interface NavbarProps {
   currentTab: string;
   onNavigate: (tab: string, param?: any) => void;
   onOpenSearch: () => void;
+  onOpenTraceMoe?: () => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ currentTab, onNavigate, onOpenSearch }) => {
+export const Navbar: React.FC<NavbarProps> = ({ currentTab, onNavigate, onOpenSearch, onOpenTraceMoe }) => {
   const { user, isAdmin, watchlist, logout, openAuthModal } = useAuth();
   const [isUserDropdownOpen, setIsUserDropdownOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -85,6 +87,18 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onNavigate, onOpenSe
 
         {/* Right side controls */}
         <div className="flex items-center gap-2.5">
+          {/* Scene Finder Button (Trace.moe) */}
+          {onOpenTraceMoe && (
+            <button
+              onClick={onOpenTraceMoe}
+              className="flex items-center gap-1.5 rounded-xl bg-rose-500/10 border border-rose-500/20 hover:bg-rose-500/20 px-2.5 py-1.5 text-xs font-bold text-rose-300 transition-all shadow-sm"
+              title="Trace.moe AI Screenshot Scene Finder"
+            >
+              <Camera className="w-3.5 h-3.5 text-rose-400" />
+              <span className="hidden sm:inline">Scene Finder</span>
+            </button>
+          )}
+
           {/* Search Trigger Button */}
           <button
             onClick={onOpenSearch}

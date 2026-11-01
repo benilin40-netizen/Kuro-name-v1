@@ -1,0 +1,56 @@
+# CodeRabbit Configuration File for KURO NAMI
+# Official Code Review Configuration
+# Documentation: https://docs.coderabbit.ai/configure-coderabbit/overview
+
+language: "en-US"
+tone_instructions: "Act as a Senior Software Architect specializing in TypeScript, React 18+, Vite SPA, and Anime Streaming Platforms."
+
+early_access: false
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+      - "master"
+      - "develop"
+
+  path_filters:
+    - "!dist/**"
+    - "!node_modules/**"
+    - "!**/*.min.js"
+    - "!**/*.map"
+
+  path_instructions:
+    - path: "src/services/canonicalAnimeResolver.ts"
+      instructions: |
+        CRITICAL: Ensure strict anime ID separation (AniList ID, MyAnimeList ID, Kitsu ID, TMDB ID).
+        Verify that artwork (posters, banners) is matched ONLY to verified canonical anime IDs and never replaced by unverified third-party provider artwork.
+    
+    - path: "src/services/streamingProvidersRegistry.ts"
+      instructions: |
+        Review playback provider integrations (AniEmbed, Miruro, VidLink, VidSrc, AnimePahe, etc.).
+        Ensure embed URLs are sanitized, timeout watchdog timers are respected, and no fake or hardcoded stream URLs are introduced.
+
+    - path: "server.ts"
+      instructions: |
+        Verify server security, admin authorization middleware (`requireAdmin`), password hashing, CORS policies, and rate-limiting.
+        Ensure API keys and private tokens are never leaked in logs or error responses.
+
+    - path: "src/components/VideoPlayer.tsx"
+      instructions: |
+        Check video player event handling, iframe sandbox permissions, HLS.js video lifecycle, error fallbacks, and SUB/DUB language switching.
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false

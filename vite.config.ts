@@ -15,9 +15,7 @@ export default defineConfig({
     port: 3000,
     strictPort: true,
     allowedHosts: true,
-    hmr: {
-      clientPort: 443,
-    },
+    hmr: false,
     watch: {
       usePolling: true,
       interval: 1000,

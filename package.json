@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx src/tests/provider.test.ts && tsx src/tests/integration.test.ts && tsx src/tests/animeManagementAndPurge.test.ts && tsx src/tests/catalogService.test.ts && tsx src/tests/animePaheProxy.test.ts"
+    "test": "tsx src/tests/provider.test.ts && tsx src/tests/integration.test.ts && tsx src/tests/animeManagementAndPurge.test.ts && tsx src/tests/catalogService.test.ts && tsx src/tests/animePaheProxy.test.ts && tsx src/tests/miruroApi.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

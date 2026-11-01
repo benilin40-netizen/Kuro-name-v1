@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { AnimeMedia } from '../types/anime.ts';
 import { AniListAPI } from '../services/anilistApi.ts';
 import { ClientAnimeService } from '../api/animeService.ts';
+import { MiruroAPI } from '../services/miruroApi.ts';
 import { CountdownTimer } from '../components/CountdownTimer.tsx';
 import { HeroSlider } from '../components/HeroSlider.tsx';
 import { AnimeCard } from '../components/AnimeCard.tsx';
@@ -13,6 +14,7 @@ import {
   TrendingUp,
   Flame,
   Tv,
+  Sparkles,
 } from 'lucide-react';
 
 interface HomeViewProps {
@@ -49,32 +51,34 @@ export const HomeView: React.FC<HomeViewProps> = ({
 }) => {
   const { user } = useAuth();
 
+  const [spotlight, setSpotlight] = useState<AnimeMedia[]>([]);
   const [trending, setTrending] = useState<AnimeMedia[]>([]);
   const [popular, setPopular] = useState<AnimeMedia[]>([]);
   const [latest, setLatest] = useState<AnimeMedia[]>([]);
+  const [upcoming, setUpcoming] = useState<AnimeMedia[]>([]);
   const [continueWatching, setContinueWatching] = useState<WatchProgressItem[]>([]);
   const [schedules, setSchedules] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // 1. Load real API data from AniList GraphQL and watch progress
+  // 1. Load real API data from Miruro API & fallbacks
   const loadHomeData = async () => {
     try {
       setLoading(true);
 
-      const [trendingRes, popularRes, latestRes, scheduleData] = await Promise.all([
-        AniListAPI.getTrendingAnime(1, 12).catch(() => ({ media: [] })),
-        AniListAPI.getPopularAnime(1, 12).catch(() => ({ media: [] })),
-        AniListAPI.getLatestAnime(1, 12).catch(() => ({ media: [] })),
-        ClientAnimeService.getAiringSchedule(7).catch(() => []),
+      const [spotlightRes, trendingRes, popularRes, latestRes, upcomingRes, scheduleData] = await Promise.all([
+        MiruroAPI.getSpotlight().catch(() => []),
+        MiruroAPI.getTrending(1, 12).catch(() => []),
+        MiruroAPI.getPopular(1, 12).catch(() => []),
+        MiruroAPI.getRecent(1, 12).catch(() => []),
+        MiruroAPI.getUpcoming(1, 12).catch(() => []),
+        MiruroAPI.getSchedule().catch(() => []),
       ]);
 
-      const trendingList = (trendingRes.media as unknown as AnimeMedia[]) || [];
-      const popularList = (popularRes.media as unknown as AnimeMedia[]) || [];
-      const latestList = (latestRes.media as unknown as AnimeMedia[]) || [];
-
-      setTrending(trendingList);
-      setPopular(popularList);
-      setLatest(latestList);
+      if (spotlightRes && spotlightRes.length > 0) setSpotlight(spotlightRes);
+      if (trendingRes && trendingRes.length > 0) setTrending(trendingRes);
+      if (popularRes && popularRes.length > 0) setPopular(popularRes);
+      if (latestRes && latestRes.length > 0) setLatest(latestRes);
+      if (upcomingRes && upcomingRes.length > 0) setUpcoming(upcomingRes);
 
       const nowSecs = Math.floor(Date.now() / 1000);
       const future = (scheduleData || []).filter((item: any) => {
@@ -105,6 +109,22 @@ export const HomeView: React.FC<HomeViewProps> = ({
 
   useEffect(() => {
     loadHomeData();
+
+    // 60-second periodic sync of featured/spotlight collections
+    const interval = setInterval(() => {
+      loadHomeData();
+    }, 60 * 1000);
+
+    // Refresh when user returns to tab
+    const handleFocus = () => {
+      loadHomeData();
+    };
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', handleFocus);
+    };
   }, [user]);
 
   const genresList = [
@@ -113,7 +133,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
     'Slice of Life', 'Music', 'Historical'
   ];
 
-  const heroList = trending.length > 0 ? trending : popular;
+  const heroList = spotlight.length > 0 ? spotlight : (trending.length > 0 ? trending : popular);
 
   return (
     <div className="space-y-12 animate-in fade-in duration-200">
@@ -410,6 +430,41 @@ export const HomeView: React.FC<HomeViewProps> = ({
           ))}
         </div>
       </section>
+
+      {/* 6.5. UPCOMING ANIME (Miruro API) */}
+      {upcoming.length > 0 && (
+        <section className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-rose-500" />
+                Upcoming Anime
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Most anticipated upcoming anime series and movies
+              </p>
+            </div>
+            <button
+              onClick={() => onNavigate('countdown')}
+              className="flex items-center gap-1 text-xs font-semibold text-rose-400 hover:text-rose-300 transition-colors"
+            >
+              <span>View Countdown</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+            {upcoming.slice(0, 10).map((item, idx) => (
+              <AnimeCard
+                key={`upc_${item.id}_${idx}`}
+                anime={item}
+                onSelect={() => onSelectAnime(item.id)}
+                onWatch={() => onWatchAnime(item.id, 1)}
+              />
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* 7. GENRES SECTION */}
       <section className="space-y-4 pt-4 border-t border-white/5">

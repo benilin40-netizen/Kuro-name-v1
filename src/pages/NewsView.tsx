@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { NewsArticle, NewsApiClient, NewsApiResponse } from '../services/newsApi.ts';
+import { NewsVideo } from '../../server/newsService';
+import { NewsVideoPlayer } from '../components/news/NewsVideoPlayer';
 import {
   Newspaper,
   Calendar,
@@ -91,6 +93,8 @@ export const NewsView: React.FC<NewsViewProps> = ({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [sortBy, setSortBy] = useState<'latest' | 'oldest' | 'relevant'>('latest');
   const [activeArticle, setActiveArticle] = useState<NewsArticle | null>(null);
+
+  const [activeVideo, setActiveVideo] = useState<NewsVideo | null>(null);
 
   const categories = [
     'ALL',
@@ -370,6 +374,15 @@ export const NewsView: React.FC<NewsViewProps> = ({
                   <span>Read original</span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
+                {featuredArticle.video && (
+                  <button
+                    onClick={() => setActiveVideo(featuredArticle.video || null)}
+                    className="inline-flex items-center gap-1.5 font-bold text-rose-400 hover:text-rose-300 transition-colors"
+                  >
+                    <span>Watch Video</span>
+                    <Play className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -469,12 +482,26 @@ export const NewsView: React.FC<NewsViewProps> = ({
                       <span>Read original</span>
                       <ExternalLink className="w-3 h-3" />
                     </a>
+                    {article.video && (
+                      <button
+                        onClick={() => setActiveVideo(article.video || null)}
+                        className="inline-flex items-center gap-1 font-bold text-slate-300 hover:text-rose-400 text-xs shrink-0"
+                      >
+                        <span>Watch Video</span>
+                        <Play className="w-3 h-3" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
             ))}
           </div>
         </div>
+      )}
+
+      {/* 8. Video Player Modal */}
+      {activeVideo && (
+        <NewsVideoPlayer video={activeVideo} onClose={() => setActiveVideo(null)} />
       )}
 
       {/* 8. Active Article Modal (Optional quick reader) */}

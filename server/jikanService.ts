@@ -2,6 +2,13 @@ const JIKAN_BASE_URL = 'https://api.jikan.moe/v4';
 
 const jikanCache = new Map<string, { data: any; expiry: number }>();
 
+// Diagnostics and metrics tracking
+let requestCount = 0;
+let failedCount = 0;
+let lastSuccessTime: string | null = null;
+let lastErrorMsg: string | null = null;
+let lastLatencyMs = 0;
+
 function getCached<T>(key: string): T | null {
   const entry = jikanCache.get(key);
   if (!entry) return null;
@@ -16,38 +23,89 @@ function setCache<T>(key: string, data: T, ttlMs = 10 * 60 * 1000): void {
   jikanCache.set(key, { data, expiry: Date.now() + ttlMs });
 }
 
-async function fetchJikan<T = any>(endpoint: string, timeoutMs = 8000): Promise<T> {
+// Rate-limit throttle queue: Jikan limit is 3 requests/sec
+let lastRequestTime = 0;
+const MIN_REQUEST_INTERVAL_MS = 350;
+
+async function throttle(): Promise<void> {
+  const now = Date.now();
+  const timeSinceLast = now - lastRequestTime;
+  if (timeSinceLast < MIN_REQUEST_INTERVAL_MS) {
+    await new Promise((resolve) => setTimeout(resolve, MIN_REQUEST_INTERVAL_MS - timeSinceLast));
+  }
+  lastRequestTime = Date.now();
+}
+
+async function fetchJikan<T = any>(endpoint: string, retries = 2, timeoutMs = 8000): Promise<T> {
   const cacheKey = `srv_jikan_${endpoint}`;
   const cached = getCached<T>(cacheKey);
   if (cached) return cached;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  await throttle();
+  requestCount++;
+  const startTime = Date.now();
 
-  try {
-    const res = await fetch(`${JIKAN_BASE_URL}${endpoint}`, {
-      signal: controller.signal,
-      headers: {
-        'Accept': 'application/json',
-      },
-    });
-    clearTimeout(timeoutId);
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-    if (!res.ok) {
-      throw new Error(`Jikan API HTTP ${res.status}`);
+    try {
+      const res = await fetch(`${JIKAN_BASE_URL}${endpoint}`, {
+        signal: controller.signal,
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+      clearTimeout(timeoutId);
+
+      if (res.status === 429) {
+        // Rate limited - back off exponentially
+        const backoffMs = (attempt + 1) * 1000;
+        console.warn(`[JIKAN SERVICE] 429 Rate limited. Backing off ${backoffMs}ms... (attempt ${attempt + 1}/${retries + 1})`);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        continue;
+      }
+
+      if (!res.ok) {
+        throw new Error(`Jikan API HTTP ${res.status}`);
+      }
+
+      const json = await res.json();
+      lastLatencyMs = Date.now() - startTime;
+      lastSuccessTime = new Date().toISOString();
+      setCache(cacheKey, json.data, 10 * 60 * 1000);
+      return json.data;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      if (attempt === retries) {
+        failedCount++;
+        lastErrorMsg = err.message || 'Unknown fetch error';
+        lastLatencyMs = Date.now() - startTime;
+        console.warn(`[JIKAN SERVICE] Failed fetch for ${endpoint}:`, err.message);
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
     }
-
-    const json = await res.json();
-    setCache(cacheKey, json.data, 10 * 60 * 1000);
-    return json.data;
-  } catch (err: any) {
-    clearTimeout(timeoutId);
-    console.warn(`[JIKAN SERVICE] Failed fetch for ${endpoint}:`, err.message);
-    throw err;
   }
+
+  throw new Error(`Jikan fetch failed after ${retries} retries`);
 }
 
 export const JikanServerService = {
+  getStats() {
+    return {
+      name: 'Jikan REST API v4',
+      endpoint: JIKAN_BASE_URL,
+      status: failedCount > 5 && requestCount > 0 && (failedCount / requestCount > 0.5) ? 'degraded' : 'healthy',
+      latencyMs: lastLatencyMs,
+      lastSuccess: lastSuccessTime,
+      lastError: lastErrorMsg,
+      requestCount,
+      failedCount,
+      cacheSize: jikanCache.size,
+    };
+  },
+
   async getTopAnime(page = 1, filter?: string) {
     const ep = filter ? `/top/anime?page=${page}&filter=${filter}` : `/top/anime?page=${page}`;
     return fetchJikan(ep);
@@ -91,6 +149,10 @@ export const JikanServerService = {
 
   async getAnimeReviews(id: number, page = 1) {
     return fetchJikan(`/anime/${id}/reviews?page=${page}`);
+  },
+
+  async getSchedules(day?: string) {
+    return fetchJikan(day ? `/schedules?filter=${day.toLowerCase()}` : '/schedules');
   },
 
   async getSeasonsNow(page = 1) {

@@ -6,6 +6,7 @@ import {
   StreamingSourceItem,
   VideoDebugLog,
   AnimePaheAdapterProvider,
+  MiruroAdapterProvider,
 } from '../services/streamingProviderAdapter.ts';
 import {
   STREAMING_PROVIDERS_REGISTRY,
@@ -17,6 +18,12 @@ import {
 import { findTMDBByTitle, TMDBMediaDetails } from '../services/tmdbService.ts';
 import { VideoPlayer } from '../components/VideoPlayer.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
+import { getAniEmbedUrl } from '../services/aniembedService.ts';
+import {
+  resolveCanonicalIdentity,
+  validateArtworkIntegrity,
+  recordPlaybackDiagnosticSession,
+} from '../services/canonicalAnimeResolver.ts';
 import {
   ChevronLeft,
   ChevronRight,
@@ -38,6 +45,7 @@ import {
   X,
   ExternalLink,
   Code,
+  Loader2,
 } from 'lucide-react';
 
 interface WatchViewProps {
@@ -81,11 +89,18 @@ export const WatchView: React.FC<WatchViewProps> = ({
 
   // Streaming Provider & Language Selector State
   const [selectedServer, setSelectedServer] = useState<string>(() => {
-    return localStorage.getItem('preferred_stream_provider') || 'vidlink';
+    return localStorage.getItem('preferred_stream_provider') || 'aniembed';
+  });
+  const [languageMode, setLanguageMode] = useState<'auto' | 'sub' | 'dub'>(() => {
+    return (localStorage.getItem('preferred_language_mode') as 'auto' | 'sub' | 'dub') || 'auto';
   });
   const [selectedLanguage, setSelectedLanguage] = useState<AudioLanguage>(() => {
     return (localStorage.getItem('preferred_audio_lang') as AudioLanguage) || 'sub';
   });
+  const [isLanguageSwitching, setIsLanguageSwitching] = useState<boolean>(false);
+  const attemptedLanguagesRef = useRef<Set<AudioLanguage>>(new Set());
+  const currentSeekTimeRef = useRef<number>(0);
+
   const [customEmbedInput, setCustomEmbedInput] = useState<string>('');
   const [showCandidateInfo, setShowCandidateInfo] = useState(false);
 
@@ -103,7 +118,9 @@ export const WatchView: React.FC<WatchViewProps> = ({
 
   const [autoplayNext, setAutoplayNext] = useState(true);
   const [initialSeekTime, setInitialSeekTime] = useState<number>(0);
+  const [failoverNotice, setFailoverNotice] = useState<string | null>(null);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
+  const failedServersForEpisodeRef = useRef<Map<string, string>>(new Map());
 
   const enabledProviders = useMemo(() => getEnabledProviders(), []);
   const currentProviderConfig = useMemo(() => getProviderById(selectedServer), [selectedServer]);
@@ -111,15 +128,32 @@ export const WatchView: React.FC<WatchViewProps> = ({
     return (anime as any)?.anilist_id || anime?.id || animeId;
   }, [anime, animeId]);
 
+  const effectiveLanguage: AudioLanguage = useMemo(() => {
+    if (languageMode === 'sub') return 'sub';
+    if (languageMode === 'dub') return 'dub';
+    return selectedLanguage;
+  }, [languageMode, selectedLanguage]);
+
   // Save server & language preferences
   const handleSelectServer = (serverId: string) => {
     setSelectedServer(serverId);
     localStorage.setItem('preferred_stream_provider', serverId);
   };
 
-  const handleSelectLanguage = (lang: AudioLanguage) => {
-    setSelectedLanguage(lang);
-    localStorage.setItem('preferred_audio_lang', lang);
+  const handleSelectLanguageMode = (mode: 'auto' | 'sub' | 'dub') => {
+    setLanguageMode(mode);
+    localStorage.setItem('preferred_language_mode', mode);
+    setIsLanguageSwitching(true);
+
+    if (mode === 'sub') {
+      setSelectedLanguage('sub');
+      localStorage.setItem('preferred_audio_lang', 'sub');
+    } else if (mode === 'dub') {
+      setSelectedLanguage('dub');
+      localStorage.setItem('preferred_audio_lang', 'dub');
+    }
+
+    setTimeout(() => setIsLanguageSwitching(false), 500);
   };
 
   // 1. Fetch Anime Metadata from Backend & AniList fallback + TMDB ID
@@ -175,17 +209,31 @@ export const WatchView: React.FC<WatchViewProps> = ({
     };
   }, [animeId]);
 
-  // 2. Fetch Episodes from Backend
+  // 2. Fetch Episodes from Miruro API & Backend
   useEffect(() => {
     let cancelled = false;
     setLoadingEpisodes(true);
 
-    fetch(`/api/anime/${animeId}/episodes`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((data: QwishEpisode[]) => {
+    Promise.all([
+      fetch(`/api/miruro/episodes/${animeId}`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`/api/anime/${animeId}/episodes`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    ])
+      .then(([miruroData, backendData]: [any, any]) => {
         if (cancelled) return;
-        const list = Array.isArray(data) ? data : [];
-        setEpisodes(list);
+        if (miruroData && Array.isArray(miruroData.episodes) && miruroData.episodes.length > 0) {
+          const mapped: QwishEpisode[] = miruroData.episodes.map((me: any) => ({
+            id: me.id || `ep_${me.number}`,
+            anime_id: String(animeId),
+            episode_number: me.number,
+            title: me.title || `Episode ${me.number}`,
+            thumbnail: me.thumbnail,
+            description: me.description,
+            status: 'READY',
+          }));
+          setEpisodes(mapped);
+        } else if (Array.isArray(backendData) && backendData.length > 0) {
+          setEpisodes(backendData);
+        }
 
         // Fetch watch progress to resume previous playback position
         fetch('/api/watch-progress')
@@ -210,6 +258,13 @@ export const WatchView: React.FC<WatchViewProps> = ({
     };
   }, [animeId, initialEpisodeNumber]);
 
+  // Clear episode attempt memory and seek state when episode changes
+  useEffect(() => {
+    attemptedLanguagesRef.current.clear();
+    currentSeekTimeRef.current = 0;
+    setInitialSeekTime(0);
+  }, [animeId, currentEpisodeNum, selectedServer]);
+
   // 3. Resolve Video Playback for Selected Server & Episode
   const resolveCurrentStream = async (signal?: AbortSignal) => {
     setLoadingStep('loading_episode');
@@ -228,177 +283,61 @@ export const WatchView: React.FC<WatchViewProps> = ({
     try {
       setLoadingStep('finding_stream');
 
-      // Check if current provider uses TMDB / buildUrl
-      const providerConfig = getProviderById(selectedServer);
-
-      // Special Handler: AnimePahe via CoorenLabs
-      if (selectedServer === 'animepahe') {
-        try {
-          const paheProvider = new AnimePaheAdapterProvider();
-          const res = await paheProvider.getEpisodeSources(String(anilistId), currentEpisodeNum, signal);
-
-          if (signal?.aborted) return;
-
-          if (res.sources && res.sources.length > 0) {
-            let filtered = res.sources;
-
-            if (selectedLanguage === 'dub') {
-              const dubSources = res.sources.filter(
-                (s) => s.language?.toLowerCase().includes('dub') || s.language?.toLowerCase().includes('eng')
-              );
-              if (dubSources.length === 0) {
-                setSources([]);
-                setVideoStatus('NO_SOURCE');
-                setVideoErrorMessage('AnimePahe does not have an English Dub available for this episode. Please switch to Japanese Sub.');
-                setLoadingStep(null);
-                return;
-              }
-              filtered = dubSources;
-            } else {
-              const subSources = res.sources.filter(
-                (s) => !s.language?.toLowerCase().includes('dub') && !s.language?.toLowerCase().includes('eng')
-              );
-              if (subSources.length > 0) {
-                filtered = subSources;
-              }
-            }
-
-            setSources(filtered);
-            setActiveSourceIndex(0);
-            setVideoStatus('READY');
-            setLoadingStep(null);
-            return;
-          }
-        } catch (err: any) {
-          if (err.name === 'AbortError') return;
-          console.warn('[WATCH VIEW] AnimePahe provider error notice:', err.message);
-        }
-
-        // Direct animepahe.pw player connection fallback
-        const directPaheUrl = `https://animepahe.pw/play/${anilistId}/${currentEpisodeNum}`;
-        const kwikFallbackUrl = `https://kwik.cx/e/${anilistId}-${currentEpisodeNum}`;
-        const fallbackSources: StreamingSourceItem[] = [
-          {
-            id: `pahe_direct_${anilistId}_ep${currentEpisodeNum}_1080p_${selectedLanguage}`,
-            url: directPaheUrl,
-            embedUrl: directPaheUrl,
-            type: 'iframe',
-            quality: '1080p',
-            language: selectedLanguage === 'dub' ? 'English (Dub)' : 'Japanese (Sub)',
-            provider: 'AnimePahe (animepahe.pw 1080p)',
-            isOfficial: true,
-          },
-          {
-            id: `pahe_kwik_${anilistId}_ep${currentEpisodeNum}_720p_${selectedLanguage}`,
-            url: kwikFallbackUrl,
-            embedUrl: kwikFallbackUrl,
-            type: 'iframe',
-            quality: '720p',
-            language: selectedLanguage === 'dub' ? 'English (Dub)' : 'Japanese (Sub)',
-            provider: 'AnimePahe Kwik (720p)',
-            isOfficial: true,
-          },
-        ];
-
-        setSources(fallbackSources);
-        setActiveSourceIndex(0);
-        setVideoStatus('READY');
-        setLoadingStep(null);
-        return;
-      }
-
-      // Special Handler: Studio Master (Configured Streams)
-      if (selectedServer === 'configured_master') {
-        const base = typeof window !== 'undefined' ? '' : 'http://127.0.0.1:3000';
-        const res = await fetch(
-          `${base}/api/playback/sources/${anilistId}/${currentEpisodeNum}?language=${selectedLanguage}`,
-          { signal }
-        );
-
-        if (signal?.aborted) return;
-
-        const rawText = await res.text();
-        console.log(`[RAW PLAYBACK SOURCES RESPONSE] Endpoint: /api/playback/sources/${anilistId}/${currentEpisodeNum} | Status: ${res.status} | Raw Text:`, rawText);
-        let data: any = {};
-        try {
-          data = JSON.parse(rawText);
-        } catch (e) {
-          console.error(`[RAW PLAYBACK SOURCES PARSE ERROR]`, e);
-        }
-
-        if (res.ok) {
-          const rawList = Array.isArray(data) ? data : data.sources || [];
-          if (rawList.length > 0) {
-            const mappedSources: StreamingSourceItem[] = rawList.map((item: any) => ({
-              id: item.id,
-              url: item.url,
-              embedUrl: item.embedUrl || (item.type === 'iframe' ? item.url : undefined),
-              type: item.type === 'iframe' ? 'iframe' : item.type === 'hls' ? 'hls' : 'mp4',
-              quality: item.quality || '1080p',
-              language: item.language || (selectedLanguage === 'dub' ? 'English (Dub)' : 'Japanese (Sub)'),
-              provider: item.provider || 'Studio Master',
-              isOfficial: true,
-            }));
-            setSources(mappedSources);
-            setActiveSourceIndex(0);
-            setVideoStatus('READY');
-            setLoadingStep(null);
-            return;
-          }
-        }
-
-        const epData = episodes.find((e) => e.episode_number === currentEpisodeNum);
-        if (epData && (epData as any).video_source_url) {
-          const vUrl = (epData as any).video_source_url;
-          const vType = (epData as any).video_source_type || (vUrl.includes('.m3u8') ? 'hls' : 'mp4');
-          setSources([
-            {
-              id: `ep_src_${epData.id}`,
-              url: vUrl,
-              embedUrl: vType === 'iframe' ? vUrl : undefined,
-              type: vType,
-              quality: '1080p',
-              language: (epData as any).language || 'Japanese (Sub)',
-              provider: (epData as any).video_provider || 'Studio Master',
-              isOfficial: true,
-            },
-          ]);
-          setActiveSourceIndex(0);
-          setVideoStatus('READY');
-          setLoadingStep(null);
-          return;
-        }
-
-        setSources([]);
-        setVideoStatus('NO_SOURCE');
-        setVideoErrorMessage('No Studio Master stream is configured for this episode yet. Choose another server above.');
-        setLoadingStep(null);
-        return;
-      }
-
-      // Handler for Custom Embed (<Embed>)
-      if (selectedServer === 'custom_embed') {
-        const epData = episodes.find((e) => e.episode_number === currentEpisodeNum);
-        const urlToUse = customEmbedInput.trim() || epData?.video_source_url || '';
-
-        if (!urlToUse) {
+      // Special Handler: AniEmbed
+      if (selectedServer === 'aniembed') {
+        if (!anilistId || Number(anilistId) <= 0) {
+          console.warn('[VIDEO PLAYER] Missing AniList ID for AniEmbed');
           setSources([]);
           setVideoStatus('NO_SOURCE');
-          setVideoErrorMessage('Please enter a custom embed URL in the input field below.');
+          setVideoErrorMessage('AniEmbed requires a valid AniList ID for this title. Please switch to another provider above.');
           setLoadingStep(null);
           return;
         }
 
+        attemptedLanguagesRef.current.add(effectiveLanguage);
+        console.log(`[VIDEO PLAYER] Initializing AniEmbed (${effectiveLanguage.toUpperCase()})`);
+
+        const seekTime = currentSeekTimeRef.current || initialSeekTime || 0;
+        const embedUrl = getAniEmbedUrl({
+          anilistId: Number(anilistId),
+          episode: currentEpisodeNum,
+          lang: effectiveLanguage,
+          autoplay: true,
+          startTime: seekTime,
+        });
+
         const sourceItem: StreamingSourceItem = {
-          id: `custom_${Date.now()}`,
-          url: urlToUse,
-          embedUrl: urlToUse,
+          id: `aniembed_${anilistId}_e${currentEpisodeNum}_${effectiveLanguage}`,
+          url: embedUrl,
+          embedUrl,
           type: 'iframe',
           quality: '1080p',
-          language: selectedLanguage === 'dub' ? 'English (Dub)' : 'Japanese (Sub)',
-          provider: '<Embed> Custom Player',
+          language: effectiveLanguage === 'dub' ? 'English (Dub)' : 'Japanese (Sub)',
+          provider: `AniEmbed (${effectiveLanguage.toUpperCase()})`,
           isOfficial: true,
         };
+
+        const canonicalIdentity = resolveCanonicalIdentity(anime);
+        const artworkVerification = validateArtworkIntegrity(canonicalIdentity);
+
+        recordPlaybackDiagnosticSession({
+          sessionId: `sess_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          timestamp: new Date().toISOString(),
+          canonicalAnimeId: canonicalIdentity.internalId,
+          anilistId: canonicalIdentity.anilistId,
+          malId: canonicalIdentity.malId,
+          providerName: 'AniEmbed',
+          providerAnimeId: String(canonicalIdentity.anilistId || canonicalIdentity.internalId),
+          providerEpisodeId: `ep_${currentEpisodeNum}`,
+          selectedEpisode: currentEpisodeNum,
+          selectedLanguage: effectiveLanguage,
+          resolvedPlaybackUrl: embedUrl,
+          metadataSource: canonicalIdentity.verificationSource || 'ANILIST',
+          artworkSource: 'VERIFIED_CANONICAL_INDEX',
+          artworkVerificationResult: artworkVerification.isValid ? 'VERIFIED' : 'REJECTED_MISMATCH',
+          playbackInitializationResult: 'SUCCESS',
+          warnings: artworkVerification.warning ? [artworkVerification.warning] : [],
+        });
 
         if (signal?.aborted) return;
         setSources([sourceItem]);
@@ -408,40 +347,30 @@ export const WatchView: React.FC<WatchViewProps> = ({
         return;
       }
 
-      // All 14 Free Streaming Servers (TMDB / MAL / AniList Embed Builder)
-      let resolvedTmdbId = tmdbDetails?.tmdb_id || (anime as any)?.tmdb_id;
-
-      if (!resolvedTmdbId && providerConfig?.requiredIdType === 'tmdb_id') {
-        // Automatically fetch TMDB ID if missing
-        const year = anime?.seasonYear || anime?.startDate?.year;
-        const fetchedTmdb = await findTMDBByTitle(titleStr, year, isMovie ? 'movie' : 'tv');
-        if (fetchedTmdb) {
-          resolvedTmdbId = fetchedTmdb.tmdb_id;
-          setTmdbDetails(fetchedTmdb);
-        }
-      }
-
+      const providerConfig = getProviderById(selectedServer);
       if (providerConfig && providerConfig.buildUrl) {
+        const seekTime = currentSeekTimeRef.current || initialSeekTime || 0;
         const embedUrl = providerConfig.buildUrl({
           malId,
           anilistId,
-          tmdbId: resolvedTmdbId,
           episodeNumber: currentEpisodeNum,
-          language: selectedLanguage,
+          language: effectiveLanguage,
           season: 1,
           isMovie,
           customEmbedUrl: customEmbedInput,
+          autoplay: true,
+          startTime: seekTime,
         });
 
         if (embedUrl) {
           const sourceItem: StreamingSourceItem = {
-            id: `${selectedServer}_${resolvedTmdbId || malId || anilistId}_e${currentEpisodeNum}_${selectedLanguage}`,
+            id: `${selectedServer}_${anilistId}_e${currentEpisodeNum}_${effectiveLanguage}`,
             url: embedUrl,
             embedUrl,
             type: 'iframe',
             quality: '1080p',
-            language: selectedLanguage === 'dub' ? 'English (Dub)' : 'Japanese (Sub)',
-            provider: `${providerConfig.name} (${selectedLanguage.toUpperCase()})`,
+            language: effectiveLanguage === 'dub' ? 'English (Dub)' : 'Japanese (Sub)',
+            provider: `${providerConfig.name} (${effectiveLanguage.toUpperCase()})`,
             isOfficial: true,
           };
 
@@ -457,14 +386,14 @@ export const WatchView: React.FC<WatchViewProps> = ({
       // Fallback
       setSources([]);
       setVideoStatus('NO_SOURCE');
-      setVideoErrorMessage(`Could not build stream link for ${providerConfig?.name || 'this server'}. Try switching servers above.`);
+      setVideoErrorMessage('Could not build stream link for selected provider. Try selecting another provider above.');
       setLoadingStep(null);
     } catch (err: any) {
       if (err.name === 'AbortError') return;
       console.error('[WATCH VIEW] Stream resolution error:', err);
       setSources([]);
       setVideoStatus('ERROR');
-      setVideoErrorMessage('Playback error. Please choose another server above.');
+      setVideoErrorMessage('Playback error. Please try another provider.');
       setLoadingStep(null);
     }
   };
@@ -483,17 +412,46 @@ export const WatchView: React.FC<WatchViewProps> = ({
     return () => {
       controller.abort();
     };
-  }, [anime, currentEpisodeNum, selectedServer, selectedLanguage, customEmbedInput]);
+  }, [anime, currentEpisodeNum, selectedServer, effectiveLanguage, customEmbedInput]);
 
   const activeSource = sources[activeSourceIndex] || null;
 
-  // Handle fallback source index
-  const handleSourceFallback = () => {
+  // Handle fallback when stream fails or times out
+  const handleSourceFallback = (failedUrl?: string, reason?: string) => {
+    console.warn(`[VIDEO PLAYER] Playback/Timeout notice on ${failedUrl || 'stream'} (${reason || 'unknown'})`);
+
+    if (selectedServer === 'aniembed') {
+      const fallbackLang: AudioLanguage = effectiveLanguage === 'sub' ? 'dub' : 'sub';
+
+      if (!attemptedLanguagesRef.current.has(fallbackLang)) {
+        attemptedLanguagesRef.current.add(fallbackLang);
+        console.log(`[VIDEO PLAYER] Trying ${fallbackLang.toUpperCase()} fallback after a confirmed ${effectiveLanguage.toUpperCase()} failure`);
+
+        setIsLanguageSwitching(true);
+        setSelectedLanguage(fallbackLang);
+        setTimeout(() => setIsLanguageSwitching(false), 800);
+        return;
+      }
+
+      console.warn('[VIDEO PLAYER] AniEmbed unavailable; manual provider selection required');
+      setVideoStatus('NO_SOURCE');
+      setVideoErrorMessage('AniEmbed stream is unavailable for this episode in both SUB and DUB. Please switch provider or open externally.');
+      return;
+    }
+
     if (sources.length > activeSourceIndex + 1) {
       setActiveSourceIndex((prev) => prev + 1);
     } else {
       setVideoStatus('NO_SOURCE');
       setVideoErrorMessage('Current server stream unavailable. Please switch to another server above.');
+    }
+  };
+
+  const handleOpenExternal = () => {
+    if (anilistId && Number(anilistId) > 0) {
+      const time = Math.floor(currentSeekTimeRef.current || initialSeekTime || 0);
+      const url = `https://aniembed.se/e/${anilistId}/${currentEpisodeNum}?lang=${effectiveLanguage}&autoplay=1&t=${time}`;
+      window.open(url, '_blank', 'noopener,noreferrer');
     }
   };
 
@@ -516,6 +474,9 @@ export const WatchView: React.FC<WatchViewProps> = ({
   };
 
   const handleProgress = (currentTime: number, duration: number) => {
+    if (currentTime > 0) {
+      currentSeekTimeRef.current = currentTime;
+    }
     if (currentTime > 5 && duration > 0) {
       fetch('/api/watch-progress', {
         method: 'POST',
@@ -575,6 +536,12 @@ export const WatchView: React.FC<WatchViewProps> = ({
           activeSourceIndex={activeSourceIndex}
           onSelectSource={(idx) => setActiveSourceIndex(idx)}
           onSourceFallback={handleSourceFallback}
+          onSwitchProvider={() => {
+            const currentIdx = enabledProviders.findIndex((p) => p.id === selectedServer);
+            const nextIdx = (currentIdx + 1) % enabledProviders.length;
+            handleSelectServer(enabledProviders[nextIdx]?.id || 'aniembed');
+          }}
+          onOpenExternal={handleOpenExternal}
           title={epTitle}
           episodeNumber={currentEpisodeNum}
           animeTitle={animeTitle}
@@ -592,6 +559,8 @@ export const WatchView: React.FC<WatchViewProps> = ({
           }}
           onNextEpisode={handleNext}
           hasNextEpisode={hasNext}
+          onPreviousEpisode={handlePrev}
+          hasPreviousEpisode={hasPrev}
           onRetry={() => resolveCurrentStream()}
         />
 
@@ -604,28 +573,43 @@ export const WatchView: React.FC<WatchViewProps> = ({
                 Stream Server ({enabledProviders.length} Available):
               </span>
 
-              {/* Sub / Dub Toggle */}
+              {/* AUTO / SUB / DUB Toggle */}
               <div className="flex items-center rounded-xl bg-black/40 border border-white/10 p-0.5">
                 <button
-                  onClick={() => handleSelectLanguage('sub')}
+                  onClick={() => handleSelectLanguageMode('auto')}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${
+                    languageMode === 'auto'
+                      ? 'bg-rose-600 text-white shadow-md'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="Automatically attempt preferred language and fallback"
+                >
+                  <span>AUTO</span>
+                  <span className="text-[10px] opacity-80 font-mono">({effectiveLanguage.toUpperCase()})</span>
+                </button>
+                <button
+                  onClick={() => handleSelectLanguageMode('sub')}
                   className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
-                    selectedLanguage === 'sub'
-                      ? 'bg-rose-600 text-white'
+                    languageMode === 'sub'
+                      ? 'bg-rose-600 text-white shadow-md'
                       : 'text-slate-400 hover:text-white'
                   }`}
                 >
                   SUB
                 </button>
                 <button
-                  onClick={() => handleSelectLanguage('dub')}
+                  onClick={() => handleSelectLanguageMode('dub')}
                   className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
-                    selectedLanguage === 'dub'
-                      ? 'bg-rose-600 text-white'
+                    languageMode === 'dub'
+                      ? 'bg-rose-600 text-white shadow-md'
                       : 'text-slate-400 hover:text-white'
                   }`}
                 >
                   DUB
                 </button>
+                {isLanguageSwitching && (
+                  <Loader2 className="w-3.5 h-3.5 text-rose-400 animate-spin mx-1.5" />
+                )}
               </div>
             </div>
 
@@ -681,22 +665,20 @@ export const WatchView: React.FC<WatchViewProps> = ({
           {/* Active Server Info Note */}
           {currentProviderConfig && (
             <div className="flex items-center justify-between text-[11px] font-mono text-slate-400 pt-1 border-t border-white/5 flex-wrap gap-2">
-              <span className="flex items-center gap-2">
+              <span className="flex items-center gap-2 flex-wrap">
                 <span>{currentProviderConfig.notes || `Streaming via ${currentProviderConfig.name}`}</span>
-                {selectedServer === 'animepahe' && (
-                  <a
-                    href={`https://animepahe.pw/play/${anilistId}/${currentEpisodeNum}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-[10px] text-rose-400 hover:text-rose-300 underline font-bold"
-                  >
-                    <ExternalLink className="w-2.5 h-2.5" />
-                    <span>animepahe.pw</span>
-                  </a>
-                )}
+                <a
+                  href={`https://aniembed.se/e/${anilistId}/${currentEpisodeNum}?lang=${effectiveLanguage}&autoplay=1`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-[10px] text-rose-400 hover:text-rose-300 underline font-bold"
+                >
+                  <ExternalLink className="w-2.5 h-2.5" />
+                  <span>Open on AniEmbed</span>
+                </a>
               </span>
               <span className="text-emerald-400 font-bold">
-                ● Connected ({selectedLanguage.toUpperCase()})
+                ● Connected ({effectiveLanguage.toUpperCase()})
               </span>
             </div>
           )}
