@@ -3,6 +3,10 @@ import { AniKotoProvider, AniKotoAnimeItem } from './anikotoService.ts';
 export function mapAniKotoToAnimeMedia(item: AniKotoAnimeItem) {
   if (!item) return null;
   const genres = item.terms_by_type?.genre || [];
+  
+  // Content moderation: Filter out Hentai
+  if (genres.some(g => g.toLowerCase() === 'hentai')) return null;
+
   const studio = item.terms_by_type?.studios?.[0] || 'Animation Studio';
   const format = item.terms_by_type?.type?.[0] || 'TV';
 

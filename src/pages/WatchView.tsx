@@ -18,7 +18,7 @@ import {
 import { findTMDBByTitle, TMDBMediaDetails } from '../services/tmdbService.ts';
 import { VideoPlayer } from '../components/VideoPlayer.tsx';
 import { useAuth } from '../context/AuthContext.tsx';
-import { getAniEmbedUrl } from '../services/aniembedService.ts';
+import { getAniEmbedUrl, buildEmbedUrl } from '../services/aniembedService.ts';
 import {
   resolveCanonicalIdentity,
   validateArtworkIntegrity,
@@ -298,13 +298,13 @@ export const WatchView: React.FC<WatchViewProps> = ({
         console.log(`[VIDEO PLAYER] Initializing AniEmbed (${effectiveLanguage.toUpperCase()})`);
 
         const seekTime = currentSeekTimeRef.current || initialSeekTime || 0;
-        const embedUrl = getAniEmbedUrl({
-          anilistId: Number(anilistId),
-          episode: currentEpisodeNum,
-          lang: effectiveLanguage,
-          autoplay: true,
-          startTime: seekTime,
-        });
+        const embedUrl = buildEmbedUrl(
+          Number(anilistId),
+          currentEpisodeNum,
+          effectiveLanguage,
+          0,
+          seekTime
+        );
 
         const sourceItem: StreamingSourceItem = {
           id: `aniembed_${anilistId}_e${currentEpisodeNum}_${effectiveLanguage}`,
@@ -530,6 +530,9 @@ export const WatchView: React.FC<WatchViewProps> = ({
       {/* 1. VIDEO PLAYER SECTION */}
       <div className="space-y-4">
         <VideoPlayer
+          anilistId={anilistId}
+          currentLang={effectiveLanguage}
+          onLangChange={(lang) => handleSelectLanguageMode(lang)}
           src={activeSource ? activeSource.url : null}
           embedUrl={activeSource?.embedUrl || (activeSource?.type === 'iframe' ? activeSource.url : null)}
           sources={sources}

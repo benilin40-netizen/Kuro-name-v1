@@ -23,6 +23,7 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import { StreamingSourceItem, VideoDebugLog } from '../services/streamingProviderAdapter.ts';
+import { buildEmbedUrl } from '../services/aniembedService.ts';
 
 export interface VideoPlayerProps {
   src?: string | null;
@@ -34,6 +35,9 @@ export interface VideoPlayerProps {
   title?: string;
   episodeNumber?: number;
   animeTitle?: string;
+  anilistId?: number | string;
+  currentLang?: 'sub' | 'dub';
+  onLangChange?: (lang: 'sub' | 'dub') => void;
   isDemo?: boolean;
   status?: 'READY' | 'PROCESSING' | 'ERROR' | 'UNAVAILABLE' | 'UPLOADING' | 'NO_SOURCE';
   errorMessage?: string;
@@ -81,6 +85,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   title,
   episodeNumber,
   animeTitle,
+  anilistId,
+  currentLang = 'sub',
+  onLangChange,
   isDemo = false,
   status = 'READY',
   errorMessage,
@@ -127,6 +134,86 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [initialSeekDone, setInitialSeekDone] = useState(false);
   const [playerState, setPlayerState] = useState<string>('Initializing');
 
+  // AniEmbed robust iframe player states
+  const [embedLang, setEmbedLang] = useState<'sub' | 'dub'>(currentLang || 'sub');
+  const [embedAutoplay, setEmbedAutoplay] = useState<0 | 1>(0); // Default to autoplay=0 on first load
+  const [embedAttempt, setEmbedAttempt] = useState<number>(0);
+  const [iframeLoaded, setIframeLoaded] = useState<boolean>(false);
+  const [embedWatchdogError, setEmbedWatchdogError] = useState<string | null>(null);
+  const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
+  const [hasClickedPlay, setHasClickedPlay] = useState<boolean>(false);
+  const iframeLoadedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    iframeLoadedRef.current = iframeLoaded;
+  }, [iframeLoaded]);
+
+  useEffect(() => {
+    if (currentLang) setEmbedLang(currentLang);
+  }, [currentLang]);
+
+  const targetAnilistId = anilistId || sources[activeSourceIndex]?.providerKey || 9046;
+  const targetEpisode = episodeNumber || 1;
+
+  const activeSource: StreamingSourceItem | undefined = sources[activeSourceIndex];
+  const activeUrl = activeSource ? activeSource.url : (src || embedUrl || '');
+  const isIframe = activeSource?.type === 'iframe' ||
+    Boolean(embedUrl && embedUrl === activeUrl) ||
+    activeUrl.includes('embed') ||
+    (activeUrl.includes('vcdn.me') && !activeUrl.includes('.m3u8')) ||
+    (activeUrl.includes('media.cm') && !activeUrl.includes('.mp4'));
+
+  // Build URL using buildEmbedUrl helper
+  const aniembedUrl = buildEmbedUrl(
+    targetAnilistId,
+    targetEpisode,
+    embedLang,
+    embedAutoplay,
+    initialTime || 0
+  );
+
+  const effectiveActiveUrl = isIframe ? aniembedUrl : activeUrl;
+  const iframeKey = `iframe_${targetAnilistId}_e${targetEpisode}_${embedLang}_ap${embedAutoplay}_att${embedAttempt}`;
+
+  // 25s Watchdog Timer
+  useEffect(() => {
+    if (!isIframe) return;
+
+    setIframeLoaded(false);
+    iframeLoadedRef.current = false;
+    setEmbedWatchdogError(null);
+
+    const watchdogTimer = setTimeout(() => {
+      if (!iframeLoadedRef.current) {
+        console.warn(`[VIDEO PLAYER] Initialization timeout after 25 seconds for ${effectiveActiveUrl}`);
+
+        if (embedAutoplay === 1) {
+          console.log('[VIDEO PLAYER] Watchdog timeout with autoplay=1. Retrying with autoplay=0...');
+          setEmbedAutoplay(0);
+          setEmbedAttempt((prev) => prev + 1);
+          setFallbackNotice('Autoplay blocked or timed out, retrying with click-to-play');
+          return;
+        }
+
+        if (embedLang === 'dub') {
+          console.log('[VIDEO PLAYER] Dub timeout. Retrying with Sub...');
+          setEmbedLang('sub');
+          setEmbedAutoplay(0);
+          setEmbedAttempt((prev) => prev + 1);
+          setFallbackNotice('Dub unavailable, playing Sub');
+          if (onLangChange) onLangChange('sub');
+          return;
+        }
+
+        setEmbedWatchdogError('Player initialization timed out after 25 seconds.');
+      }
+    }, 25000);
+
+    return () => {
+      clearTimeout(watchdogTimer);
+    };
+  }, [isIframe, effectiveActiveUrl, embedAutoplay, embedLang, embedAttempt, onLangChange]);
+
   const skipIntro = () => {
     if (intro && videoRef.current) {
       videoRef.current.currentTime = intro.end + 0.5;
@@ -149,13 +236,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const fragTimeoutHandleRef = useRef<any>(null);
 
   // Active source resolution
-  const activeSource: StreamingSourceItem | undefined = sources[activeSourceIndex];
-  const activeUrl = activeSource ? activeSource.url : (src || embedUrl || '');
-  const isIframe = activeSource?.type === 'iframe' ||
-    Boolean(embedUrl && embedUrl === activeUrl) ||
-    activeUrl.includes('embed') ||
-    (activeUrl.includes('vcdn.me') && !activeUrl.includes('.m3u8')) ||
-    (activeUrl.includes('media.cm') && !activeUrl.includes('.mp4'));
+
+
 
   // PostMessage listener for embed players (VidLink, plyr, iframe messengers)
   useEffect(() => {
@@ -743,36 +825,152 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     >
       {/* 1. Official Iframe Player Viewport (VCDN / media.cm / embeds) */}
       {isIframe ? (
-        <iframe
-          id="anime-player"
-          key={activeUrl}
-          ref={iframeRef}
-          src={activeUrl}
-          title={title || `Episode ${episodeNumber}`}
-          frameBorder={0}
-          allow="autoplay; fullscreen; picture-in-picture; accelerometer; gyroscope; clipboard-write; encrypted-media"
-          allowFullScreen
-          scrolling="no"
-          style={{
-            width: "100%",
-            height: "100%",
-            aspectRatio: "16 / 9",
-            border: 0,
-          }}
-          className="w-full h-full border-0 bg-black"
-          referrerPolicy="no-referrer"
-          onLoad={() => {
-            console.log('[VIDEO PLAYER] Iframe loaded; playback not yet confirmed');
-            setPlayerState('Iframe Loaded (Playback Unconfirmed)');
-            setTimeout(() => {
-              setIsLoading(false);
-            }, 2000);
-          }}
-          onError={() => {
-            console.error('[VIDEO PLAYER] Iframe failed to load');
-            if (onSourceFallback) onSourceFallback(activeUrl, 'iframeLoadError');
-          }}
-        />
+        <div className="relative w-full h-full bg-black">
+          {embedWatchdogError ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/95 p-6 text-center z-30">
+              <AlertCircle className="w-10 h-10 text-rose-500 mb-2" />
+              <p className="text-sm font-bold text-white mb-1">Player Timed Out</p>
+              <p className="text-xs text-slate-400 mb-4">{embedWatchdogError}</p>
+              {fallbackNotice && (
+                <p className="text-xs text-amber-400 mb-3 bg-amber-500/10 px-3 py-1 rounded-lg border border-amber-500/20">
+                  {fallbackNotice}
+                </p>
+              )}
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => {
+                    setEmbedWatchdogError(null);
+                    setEmbedAutoplay(0);
+                    setEmbedAttempt((prev) => prev + 1);
+                    setIframeLoaded(false);
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white transition-colors"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Retry Player</span>
+                </button>
+                <button
+                  onClick={() => {
+                    const toggleTarget = embedLang === 'dub' ? 'sub' : 'dub';
+                    setEmbedLang(toggleTarget);
+                    setEmbedWatchdogError(null);
+                    setEmbedAutoplay(0);
+                    setEmbedAttempt((prev) => prev + 1);
+                    setIframeLoaded(false);
+                    if (onLangChange) onLangChange(toggleTarget);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold text-white transition-colors"
+                >
+                  Switch to {embedLang === 'dub' ? 'SUB' : 'DUB'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <iframe
+                id="anime-player"
+                key={iframeKey}
+                ref={iframeRef}
+                src={effectiveActiveUrl}
+                title={title || `Episode ${episodeNumber}`}
+                frameBorder={0}
+                allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+                allowFullScreen
+                referrerPolicy="origin"
+                sandbox="allow-scripts allow-same-origin allow-presentation"
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  aspectRatio: "16 / 9",
+                  border: 0,
+                }}
+                className="w-full h-full border-0 bg-black"
+                onLoad={() => {
+                  console.log('[VIDEO PLAYER] Iframe onLoad fired (success)');
+                  setIframeLoaded(true);
+                  setIsLoading(false);
+                }}
+                onError={() => {
+                  console.error('[VIDEO PLAYER] Iframe error event');
+                  if (onSourceFallback) onSourceFallback(effectiveActiveUrl, 'iframeLoadError');
+                }}
+              />
+
+              {/* Loading Overlay until onLoad fires */}
+              {!iframeLoaded && (
+                <div className="absolute inset-0 z-20 bg-black/85 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center pointer-events-none">
+                  <div className="w-12 h-12 rounded-2xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center mx-auto mb-3">
+                    <Loader2 className="w-6 h-6 text-rose-500 animate-spin" />
+                  </div>
+                  <p className="text-sm font-bold text-white">Loading player...</p>
+                  <p className="text-xs text-slate-400 mt-1 font-mono">Connecting to AniEmbed ({embedLang.toUpperCase()})</p>
+                </div>
+              )}
+
+              {/* Fallback Notice Toast */}
+              {fallbackNotice && (
+                <div className="absolute top-4 left-4 z-30 bg-black/80 border border-rose-500/30 text-rose-300 px-3 py-1.5 rounded-xl text-xs font-mono backdrop-blur-md flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
+                  <span>{fallbackNotice}</span>
+                  <button onClick={() => setFallbackNotice(null)} className="ml-2 text-slate-400 hover:text-white">✕</button>
+                </div>
+              )}
+
+              {/* Custom Play Overlay Button (autoplay=0 default on first load) */}
+              {!hasClickedPlay && embedAutoplay === 0 && iframeLoaded && (
+                <div
+                  onClick={() => {
+                    setHasClickedPlay(true);
+                    setEmbedAutoplay(1);
+                    setEmbedAttempt((prev) => prev + 1);
+                    setIframeLoaded(false);
+                  }}
+                  className="absolute inset-0 z-20 flex items-center justify-center bg-black/40 backdrop-blur-[2px] cursor-pointer group/play"
+                >
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="w-20 h-20 rounded-full bg-rose-600 hover:bg-rose-500 flex items-center justify-center shadow-2xl shadow-rose-950/80 transition-transform transform group-hover/play:scale-110">
+                      <Play className="w-8 h-8 fill-white text-white ml-1" />
+                    </div>
+                    <span className="text-xs font-bold font-mono tracking-wider text-white bg-black/60 px-3 py-1 rounded-full border border-white/10">
+                      CLICK TO START PLAYBACK ({embedLang.toUpperCase()})
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Sub/Dub Toggle Overlay */}
+              <div className="absolute bottom-3 right-3 z-30 flex items-center gap-2 bg-black/80 border border-white/10 p-1.5 rounded-xl backdrop-blur-md">
+                <span className="text-[10px] font-mono font-bold text-slate-400 pl-1">AUDIO:</span>
+                <button
+                  onClick={() => {
+                    setEmbedLang('sub');
+                    setEmbedAttempt((prev) => prev + 1);
+                    setIframeLoaded(false);
+                    if (onLangChange) onLangChange('sub');
+                  }}
+                  className={`px-2 py-1 rounded-lg text-xs font-bold transition-all ${
+                    embedLang === 'sub' ? 'bg-rose-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  SUB
+                </button>
+                <button
+                  onClick={() => {
+                    setEmbedLang('dub');
+                    setEmbedAttempt((prev) => prev + 1);
+                    setIframeLoaded(false);
+                    if (onLangChange) onLangChange('dub');
+                  }}
+                  className={`px-2 py-1 rounded-lg text-xs font-bold transition-all ${
+                    embedLang === 'dub' ? 'bg-rose-600 text-white shadow' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  DUB
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       ) : (
         /* 2. Direct HLS / Native MP4 Video Player Viewport */
         <video
